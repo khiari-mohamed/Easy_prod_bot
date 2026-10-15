@@ -47,7 +47,7 @@ export class AiController {
   @Throttle({ default: { limit: 20, ttl: 60_000 } })
   @Post('captions')
   async captions(@Body() dto: CaptionsDto) {
-    const campaign = await this.prisma.campaign.findFirst({ orderBy: { createdAt: 'desc' } });
+    const campaign = await this.prisma.campaign.findFirst({ orderBy: { createdAt: 'asc' } });
     if (!campaign) throw new NotFoundException('No campaign configured');
 
     const [day, item] = await Promise.all([
@@ -124,7 +124,7 @@ export class AiController {
   @Throttle({ default: { limit: 30, ttl: 60_000 } })
   @Post('hashtags')
   async hashtags(@Body() dto: HashtagsDto) {
-    const campaign = await this.prisma.campaign.findFirst({ orderBy: { createdAt: 'desc' } });
+    const campaign = await this.prisma.campaign.findFirst({ orderBy: { createdAt: 'asc' } });
     const officialTags = campaign?.hashtags ?? [];
     if (!this.gemini.enabled) {
       return { hashtags: officialTags, source: 'fallback', reason: 'GEMINI_API_KEY manquante' };

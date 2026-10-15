@@ -140,6 +140,7 @@ export class PublisherService {
   /** Video containers are processed asynchronously by Instagram. */
   private async waitForContainer(containerId: string, token: string) {
     const deadline = Date.now() + 5 * 60_000;
+    let wait = 5_000; // progressive: 5 s, 10 s, 15 s, then 20 s (was a flat 5 s = ~60 calls per video)
     while (Date.now() < deadline) {
       const s = await graph<{ status_code?: string; status?: string }>(
         'GET',
@@ -151,7 +152,8 @@ export class PublisherService {
       if (s.status_code === 'ERROR' || s.status_code === 'EXPIRED') {
         throw new MetaApiError(`Instagram could not process the media (${s.status ?? s.status_code})`, 400, 100);
       }
-      await sleep(5_000);
+      await sleep(wait);
+      wait = Math.min(wait + 5_000, 20_000);
     }
     // Nothing was published yet (media_publish was not called): a normal, retryable error, NOT an ambiguous one.
     throw new MetaApiError('Timed out waiting for Instagram to process the video', 408);

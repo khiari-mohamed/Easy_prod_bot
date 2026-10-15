@@ -8,6 +8,7 @@ import { computeBestTime, BestTime } from './best-time';
 import { InsightsService } from './insights.service';
 import { ImportRowDto } from './analytics.dto';
 import { dayKey, previousRange, Range } from './analytics-range';
+import { backgroundSyncEnabled, metaGuard } from '../meta/meta-guard';
 
 const PLATFORMS: Platform[] = ['INSTAGRAM', 'FACEBOOK', 'TIKTOK'];
 
@@ -168,9 +169,10 @@ export class AnalyticsService {
     return result;
   }
 
-  /** Pull fresh metrics for posts published in the last 14 days. */
-  @Cron('0 */30 * * * *')
+  /** Pull fresh metrics every 2 hours (was every 30 min). Skipped while Meta calls are paused. */
+  @Cron('0 0 */2 * * *')
   async scheduledSync() {
+    if (!backgroundSyncEnabled() || metaGuard.isOpen()) return; // META_BACKGROUND_SYNC=false to disable
     try {
       await this.sync();
     } catch (e) {
@@ -179,7 +181,10 @@ export class AnalyticsService {
   }
 
   async sync() {
-    const since = new Date(Date.now() - 14 * 24 * 3600_000);
+    if (metaGuard.isOpen()) {
+      return { checked: 0, updated: 0, skipped: 0, paused: metaGuard.status().reason };
+    }
+    const since = new Date(Date.now() - 7 * 24 * 3600_000);
     const posts = await this.prisma.post.findMany({
       where: {
         status: 'PUBLISHED',
@@ -188,10 +193,23 @@ export class AnalyticsService {
         platform: { in: ['FACEBOOK', 'INSTAGRAM'] },
         publishedAt: { gte: since },
       },
+      include: { metrics: { orderBy: { capturedAt: 'desc' }, take: 1, select: { capturedAt: true } } },
+      orderBy: { publishedAt: 'desc' },
+      take: 15,
     });
 
     let updated = 0;
+    let skipped = 0;
     for (const post of posts) {
+      if (metaGuard.isOpen()) break;
+      // Do not re-read what was read recently: 90 min for posts under 48 h old, 12 h for older ones.
+      const ageMs = Date.now() - (post.publishedAt?.getTime() ?? Date.now());
+      const minGapMs = ageMs < 48 * 3600_000 ? 90 * 60_000 : 12 * 3600_000;
+      const lastAt = post.metrics[0]?.capturedAt.getTime() ?? 0;
+      if (Date.now() - lastAt < minGapMs) {
+        skipped++;
+        continue;
+      }
       const account = post.accountId
         ? await this.prisma.socialAccount.findUnique({ where: { id: post.accountId } })
         : await this.accounts.activeFor(post.platform);
@@ -205,7 +223,7 @@ export class AnalyticsService {
       });
       updated++;
     }
-    return { checked: posts.length, updated };
+    return { checked: posts.length, updated, skipped };
   }
 
   /**

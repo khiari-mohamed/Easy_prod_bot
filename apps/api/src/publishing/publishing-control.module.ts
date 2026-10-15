@@ -69,6 +69,7 @@ export class PublishingControlController {
 
     const pauseState = await this.settings.pauseState();
     const campaign = await this.prisma.campaign.findFirst({
+      orderBy: { createdAt: 'asc' },
       select: { id: true, autoPublishEnabled: true, publishingPaused: true, timezone: true },
     });
 
@@ -79,7 +80,7 @@ export class PublishingControlController {
   @Post('campaign/auto-publish')
   @Roles(Role.APPROVER)
   async setCampaignAutoPublish(@Body() dto: SetCampaignAutoPublishDto, @CurrentUser() user: AuthUser) {
-    const campaign = await this.prisma.campaign.findFirst();
+    const campaign = await this.prisma.campaign.findFirst({ orderBy: { createdAt: 'asc' } });
     if (!campaign) return { ok: false };
     await this.prisma.campaign.update({
       where: { id: campaign.id },
@@ -93,7 +94,7 @@ export class PublishingControlController {
   @Post('campaign/pause')
   @Roles(Role.APPROVER)
   async pauseCampaign(@Body() dto: PauseCampaignDto, @CurrentUser() user: AuthUser) {
-    const campaign = await this.prisma.campaign.findFirst();
+    const campaign = await this.prisma.campaign.findFirst({ orderBy: { createdAt: 'asc' } });
     if (!campaign) return { ok: false };
     await this.prisma.campaign.update({
       where: { id: campaign.id },

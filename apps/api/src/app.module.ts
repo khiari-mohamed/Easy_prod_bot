@@ -12,6 +12,7 @@ import { CampaignModule } from './campaign/campaign.module';
 import { ContentModule } from './content/content.module';
 import { HealthController } from './health.controller';
 import { MediaModule } from './media/media.module';
+import { MetaGuardModule } from './meta/meta-guard.module';
 import { PlanningModule } from './planning/planning.module';
 import { PostsModule } from './posts/posts.module';
 import { PrismaModule } from './prisma/prisma.service';
@@ -28,6 +29,7 @@ import { TikTokModule } from './tiktok/tiktok.module';
     ThrottlerModule.forRoot([{ ttl: 60_000, limit: 300 }]),
     ScheduleModule.forRoot(),
     PrismaModule,
+    MetaGuardModule,
     MediaModule,
     AuditModule,
     SettingsModule,

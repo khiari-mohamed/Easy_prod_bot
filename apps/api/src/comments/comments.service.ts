@@ -5,9 +5,11 @@ import { PrismaService } from '../prisma/prisma.service';
 import { AccountsService } from '../accounts/accounts.service';
 import { CommentConfig, CONFIG_KEY, DEFAULT_CONFIG, sanitizeConfig } from './comment-config';
 import { hasAiKey, lintForAuto, suggestReply } from './comment-ai';
+import { SettingsService } from '../settings/settings.module';
 import {
   AmbiguousError, CommentPlatform, deleteComment, hideComment, listComments, postComment, RemoteComment, replyToComment,
 } from './comment-graph';
+import { commentAutomationEnabled, MetaBlockedError, metaGuard } from '../meta/meta-guard';
 
 const PLATFORMS: Platform[] = ['FACEBOOK', 'INSTAGRAM'];
 // Scopes to verify in the Meta dashboard. Informational only: Graph's own error is the source of truth.
@@ -16,8 +18,7 @@ const SCOPES: Record<CommentPlatform, string[]> = {
   FACEBOOK: ['pages_manage_engagement', 'pages_read_user_content'],
 };
 const MAX_GENERATED_PER_POLL = 10;
-
-type PostWithCampaign = Post & { campaign: { titleLatin: string; titleArabic: string | null; hashtags: string[]; brief: string } | null };
+type PostWithCampaign = Post & { campaign: { titleLatin: string; titleArabic: string | null; hashtags: string[]; brief: string; releaseDate: Date } | null };
 
 interface PollCtx {
   generated: number;
@@ -31,9 +32,10 @@ export class CommentsService {
   private busy = { tick: false, poll: false };
   private warnedNoKey = false;
 
-  constructor(
+    constructor(
     private readonly prisma: PrismaService,
     private readonly accounts: AccountsService,
+    private readonly settings: SettingsService,
   ) {}
 
   // ------------------------------------------------------------ config
@@ -56,7 +58,8 @@ export class CommentsService {
   }
 
   /** Hook: if your global pause lives somewhere else (a Setting key, say), check it here too. */
-  private async paused() {
+    private async paused() {
+    if (await this.settings.isPaused()) return true; // the global emergency button
     return (await this.prisma.campaign.count({ where: { publishingPaused: true } })) > 0;
   }
 
@@ -154,6 +157,7 @@ export class CommentsService {
 
   @Cron('0 * * * * *')
   async tick() {
+    if (!commentAutomationEnabled() || metaGuard.isOpen()) return; // META_COMMENT_AUTOMATION=true to enable
     if (this.busy.tick) return;
     this.busy.tick = true;
     try {
@@ -166,8 +170,9 @@ export class CommentsService {
     }
   }
 
-  @Cron('0 */5 * * * *')
+  @Cron('0 */15 * * * *')
   async scheduledPoll() {
+    if (!commentAutomationEnabled() || metaGuard.isOpen()) return; // META_COMMENT_AUTOMATION=true to enable
     try {
       await this.poll();
     } catch (e) {
@@ -247,7 +252,7 @@ export class CommentsService {
       data: { status: 'NEEDS_CHECK', error: 'Interrompu pendant l’envoi : vérifiez sur la plateforme' },
     });
 
-    const jobs = await this.prisma.commentJob.findMany({ where: { status: 'APPROVED', kind: { in: kinds } }, orderBy: { createdAt: 'asc' }, take: 10 });
+    const jobs = await this.prisma.commentJob.findMany({ where: { status: 'APPROVED', kind: { in: kinds } }, orderBy: { createdAt: 'asc' }, take: 3 });
     for (const job of jobs) {
       const claim = await this.prisma.commentJob.updateMany({
         where: { id: job.id, status: 'APPROVED' },
@@ -271,7 +276,10 @@ export class CommentsService {
           : await replyToComment(platform, job.remoteCommentId as string, job.text, token);
       await finish({ status: 'SENT', sentAt: new Date(), resultRemoteId: remoteId, error: null });
     } catch (e) {
-      if (e instanceof AmbiguousError) {
+      if (e instanceof MetaBlockedError) {
+        // Refused before anything was sent: not ambiguous. Back to APPROVED, it goes out when Meta calls resume.
+        await finish({ status: 'APPROVED', error: e.message });
+      } else if (e instanceof AmbiguousError) {
         await finish({ status: 'NEEDS_CHECK', error: `Résultat inconnu : vérifiez sur la plateforme (${e.message})` });
       } else {
         await finish({ status: 'FAILED', error: (e as Error).message });
@@ -285,6 +293,14 @@ export class CommentsService {
     const cfg = await this.getConfig();
     const ctx: PollCtx = { generated: 0, autoCount: 0, summary: { posts: 0, comments: 0, moderated: 0, queued: 0, auto: 0, skipped: 0, errors: [] } };
     if (!(cfg.aiReply || cfg.autoReply || cfg.moderation)) return ctx.summary;
+    if (metaGuard.isOpen()) {
+      ctx.summary.errors.push(`Meta calls are paused: ${metaGuard.status().reason}`);
+      return ctx.summary;
+    }
+    if (await this.paused()) {
+      ctx.summary.errors.push('Publishing is paused');
+      return ctx.summary;
+    }
     if (this.busy.poll) return ctx.summary;
     this.busy.poll = true;
     try {
@@ -297,11 +313,11 @@ export class CommentsService {
           isExternal: false,
           externalId: { not: null },
           platform: { in: PLATFORMS },
-          publishedAt: { gte: new Date(Date.now() - 7 * 24 * 3600_000) },
+          publishedAt: { gte: new Date(Date.now() - 3 * 24 * 3600_000) },
         },
-        include: { campaign: { select: { titleLatin: true, titleArabic: true, hashtags: true, brief: true } } },
+        include: { campaign: { select: { titleLatin: true, titleArabic: true, hashtags: true, brief: true, releaseDate: true } } },
         orderBy: { publishedAt: 'desc' },
-        take: 25,
+        take: 10,
       });
       for (const post of posts) {
         const account = await this.accountFor(post);

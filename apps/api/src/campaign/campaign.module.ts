@@ -118,7 +118,8 @@ export class CampaignService implements OnApplicationBootstrap {
   }
 
   async get() {
-    const campaign = await this.prisma.campaign.findFirst({
+      const campaign = await this.prisma.campaign.findFirst({
+      orderBy: { createdAt: 'asc' },
       include: {
         days: {
           orderBy: { date: 'asc' },
@@ -144,7 +145,7 @@ export class CampaignService implements OnApplicationBootstrap {
   }
 
   async update(dto: UpdateCampaignDto, user: AuthUser) {
-    const campaign = await this.prisma.campaign.findFirst();
+      const campaign = await this.prisma.campaign.findFirst({ orderBy: { createdAt: 'asc' } });
     if (!campaign) throw new NotFoundException();
     const updated = await this.prisma.campaign.update({ where: { id: campaign.id }, data: dto });
     await this.audit.log(user.id, 'campaign.update', 'Campaign', campaign.id);

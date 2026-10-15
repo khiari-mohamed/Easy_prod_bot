@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Platform, SocialAccount } from '@prisma/client';
 import { graph } from '../meta/graph.client';
+import { metaGuard } from '../meta/meta-guard';
 
 export interface PagePost {
   id: string;
@@ -25,13 +26,15 @@ export interface PageContext {
 @Injectable()
 export class PageContextService {
   private readonly log = new Logger(PageContextService.name);
-  private static readonly TTL_MS = 10 * 60_000;
+  private static readonly TTL_MS = 60 * 60_000; // 1 h cache: captions do not need live page data
+  private static readonly MAX_POSTS = 8; // was 20: each post costs one extra insights call
   private readonly cache = new Map<string, { at: number; ctx: PageContext }>();
 
   async fetch(account: SocialAccount, token: string): Promise<PageContext | null> {
     const key = `${account.platform}:${account.externalId}`;
     const hit = this.cache.get(key);
     if (hit && Date.now() - hit.at < PageContextService.TTL_MS) return hit.ctx;
+    if (metaGuard.isOpen()) return hit?.ctx ?? null; // paused: serve the stale copy, never call Meta
     try {
       const ctx =
         account.platform === 'INSTAGRAM'
@@ -56,7 +59,7 @@ export class PageContextService {
     // Recent posts with engagement
     const feed = await graph<{ data: Array<{ id: string; message?: string; created_time: string; reactions?: { summary: { total_count: number } }; comments?: { summary: { total_count: number } }; shares?: { count: number } }> }>(
       'GET', `${id}/posts`,
-      { fields: 'id,message,created_time,reactions.summary(true).limit(0),comments.summary(true).limit(0),shares', limit: 20 },
+      { fields: 'id,message,created_time,reactions.summary(true).limit(0),comments.summary(true).limit(0),shares', limit: PageContextService.MAX_POSTS },
       token,
     ).catch(() => ({ data: [] }));
 
@@ -104,7 +107,7 @@ export class PageContextService {
     // Recent media with engagement
     const media = await graph<{ data: Array<{ id: string; caption?: string; timestamp: string; like_count?: number; comments_count?: number; media_type?: string }> }>(
       'GET', `${id}/media`,
-      { fields: 'id,caption,timestamp,like_count,comments_count,media_type', limit: 20 },
+      { fields: 'id,caption,timestamp,like_count,comments_count,media_type', limit: PageContextService.MAX_POSTS },
       token,
     ).catch(() => ({ data: [] }));
 

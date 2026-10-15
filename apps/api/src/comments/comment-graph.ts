@@ -1,3 +1,5 @@
+import { metaGuard } from '../meta/meta-guard';
+
 // Adjust the env var name if your .env uses another one.
 const GRAPH = `https://graph.facebook.com/${process.env.META_GRAPH_VERSION ?? 'v26.0'}`;
 
@@ -16,6 +18,8 @@ export class AmbiguousError extends Error {}
 type Json = any;
 
 async function call(method: 'GET' | 'POST' | 'DELETE', path: string, token: string, params: Record<string, string> = {}): Promise<Json> {
+  // The gate: spacing, daily caps, circuit breaker. Throws MetaBlockedError BEFORE anything is sent.
+  await metaGuard.acquire(method === 'GET' ? 'read' : 'write', token);
   const url = new URL(`${GRAPH}/${path}`);
   const init: RequestInit = { method, signal: AbortSignal.timeout(20_000) };
   if (method === 'POST') {
@@ -32,6 +36,7 @@ async function call(method: 'GET' | 'POST' | 'DELETE', path: string, token: stri
     throw new AmbiguousError(`Réponse inconnue (${(e as Error).message})`);
   }
   const json = await res.json().catch(() => null) as { error?: { message?: string; code?: number } } | null;
+  metaGuard.observe(res.headers, json?.error, token); // usage headers + error codes, after EVERY call
   if (!res.ok) {
     const msg = json?.error?.message ?? `HTTP ${res.status}`;
     if (method !== 'GET' && res.status >= 500) throw new AmbiguousError(msg);

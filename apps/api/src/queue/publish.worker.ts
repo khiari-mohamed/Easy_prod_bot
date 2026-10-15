@@ -6,6 +6,7 @@ import { SettingsService } from '../settings/settings.module';
 import { AccountsService } from '../accounts/accounts.service';
 import { PublisherService } from '../publishing/publisher.service';
 import { MetaApiError } from '../meta/graph.client';
+import { MetaBlockedError, metaGuard } from '../meta/meta-guard';
 import { supportsAutoPublish } from '../posts/post.rules';
 import { withState } from '../posts/post-state';
 import { redisOptions } from '../env';
@@ -43,6 +44,18 @@ export class PublishWorker implements OnModuleInit, OnModuleDestroy {
       await this.prisma.post.updateMany({
         where: { id: postId, status: 'QUEUED' },
         data: withState('APPROVED', { statusNote: 'Publishing was paused: returned to the schedule' }),
+      });
+      return;
+    }
+
+    // Meta safety breaker open (rate limit / flagged activity / usage too high): never call Meta now.
+    // The post goes back to the schedule; if its slot is missed by 30 min the scheduler makes it manual.
+    if (metaGuard.isOpen()) {
+      await this.prisma.post.updateMany({
+        where: { id: postId, status: 'QUEUED' },
+        data: withState('APPROVED', {
+          statusNote: `Meta calls are paused (${metaGuard.status().reason}): returned to the schedule`,
+        }),
       });
       return;
     }
@@ -98,6 +111,17 @@ export class PublishWorker implements OnModuleInit, OnModuleDestroy {
         post.publishMode === 'AUTO'
           ? 'Auto-publish is disabled for this campaign — enable it or publish manually'
           : 'Manual post: publish it yourself, or use "Publish now" to authorize one API publication',
+      );
+      return;
+    }
+
+    // Duplicate guard: the same caption + media already published recently is the classic spam signal.
+    const duplicate = await this.recentDuplicate(post);
+    if (duplicate) {
+      await this.toManual(
+        postId,
+        'The same caption and media were already published in the last ' +
+          `${this.duplicateWindowHours()} h (post ${duplicate.id}). Change the content, or set META_DUPLICATE_WINDOW_HOURS=0 for a test.`,
       );
       return;
     }
@@ -189,6 +213,20 @@ export class PublishWorker implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
+    // The safety guard refused BEFORE anything was sent to Meta: this is NOT an ambiguous result.
+    // A human (or the schedule once the pause ends) decides; never burn retries against a paused Meta.
+    if (e instanceof MetaBlockedError) {
+      await this.prisma.publishAttempt.update({
+        where: { id: attemptId },
+        data: { state: 'FAILED', finishedAt: new Date(), error: message },
+      });
+      await this.prisma.post.update({
+        where: { id: postId },
+        data: withState('MANUAL_REQUIRED', { statusNote: `Not sent: ${message}` }),
+      });
+      throw new UnrecoverableError(message);
+    }
+
     if (e instanceof MetaApiError && e.code === 190) {
       await this.prisma.socialAccount.update({ where: { id: accountId }, data: { status: 'EXPIRED' } });
     }
@@ -234,6 +272,28 @@ export class PublishWorker implements OnModuleInit, OnModuleDestroy {
       data: withState('QUEUED', { statusNote: `Retrying: ${message}` }),
     });
     throw e;
+  }
+
+  private duplicateWindowHours(): number {
+    const h = Number(process.env.META_DUPLICATE_WINDOW_HOURS ?? 24);
+    return Number.isFinite(h) && h > 0 ? h : 0;
+  }
+
+  /** Another post of the same platform with the same caption and media, published inside the window. */
+  private async recentDuplicate(post: { id: string; platform: Platform; caption: string; assetId: string | null }) {
+    const hours = this.duplicateWindowHours();
+    if (hours <= 0) return null;
+    return this.prisma.post.findFirst({
+      where: {
+        id: { not: post.id },
+        platform: post.platform,
+        caption: post.caption,
+        assetId: post.assetId,
+        status: 'PUBLISHED',
+        publishedAt: { gte: new Date(Date.now() - hours * 3600_000) },
+      },
+      select: { id: true },
+    });
   }
 
   /** The post's own account when it is usable; otherwise (no account assigned) the active account of the platform. */

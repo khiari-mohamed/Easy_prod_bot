@@ -4,7 +4,7 @@ export interface ReplyInput {
   comment: string;
   author: string | null;
   platform: string;
-  campaign: { titleLatin: string; titleArabic: string | null; hashtags: string[]; brief: string } | null;
+  campaign: { titleLatin: string; titleArabic: string | null; hashtags: string[]; brief: string; releaseDate: Date } | null;
 }
 
 export type Suggestion = { text: string } | { skip: true; reason: string };
@@ -25,7 +25,7 @@ Règles :
 export async function suggestReply(input: ReplyInput): Promise<Suggestion> {
   const c = input.campaign;
   const facts = c
-    ? `Titre : ${c.titleLatin}${c.titleArabic ? ` (${c.titleArabic})` : ''}\nHashtags officiels : ${c.hashtags.join(' ')}\nSortie en salle : 14 octobre 2026\n${c.brief}`
+    ? `Titre : ${c.titleLatin}${c.titleArabic ? ` (${c.titleArabic})` : ''}\nHashtags officiels : ${c.hashtags.join(' ')}\nSortie en salle : ${c.releaseDate.toLocaleDateString('fr-FR', { timeZone: 'Africa/Tunis', day: 'numeric', month: 'long', year: 'numeric' })}\n${c.brief}`
     : 'Aucun fait disponible.';
   const comment = input.comment.replace(/</g, '＜').slice(0, 1000);
   const res = await fetch('https://api.anthropic.com/v1/messages', {
