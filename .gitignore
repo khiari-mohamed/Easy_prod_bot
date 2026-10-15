@@ -1,0 +1,13 @@
+node_modules
+dist
+.next
+.env
+.env.*
+!.env.example
+!.env.prod.example
+uploads
+*.log
+*.zip
+*.tar.gz
+*.tsbuildinfo
+.DS_Store

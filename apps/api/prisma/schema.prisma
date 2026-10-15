@@ -1,0 +1,629 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// =====================================================================
+// STAGE 1 = EXPAND ONLY.
+// Every change below is additive (new enums/values, new models, new
+// nullable or defaulted columns). Nothing existing is removed, renamed
+// or retyped, so the current NestJS services keep compiling and running.
+// Legacy fields are tagged DEPRECATED and are removed in a later,
+// separately authorized CONTRACT stage once the services are migrated.
+// =====================================================================
+
+enum Role {
+  ADMIN
+  APPROVER
+  EDITOR
+}
+
+enum Platform {
+  FACEBOOK
+  INSTAGRAM
+  TIKTOK // reserved for the future; no publishing implemented or authorized
+}
+
+enum PostFormat {
+  IMAGE
+  VIDEO
+  REEL
+  STORY
+  TEXT
+}
+
+/// DEPRECATED (contract stage): replaced by ApprovalStatus + PublishState.
+/// Kept so the existing worker/services keep working during the transition.
+enum PostStatus {
+  DRAFT
+  PENDING_APPROVAL
+  APPROVED
+  QUEUED
+  PUBLISHING
+  PUBLISHED
+  FAILED
+  MANUAL_REQUIRED
+  CANCELLED
+  NEEDS_RECONCILIATION // NEW: Meta may have published, result unknown
+}
+
+/// NEW: human review only. Never touched by the publisher.
+enum ApprovalStatus {
+  DRAFT
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+/// NEW: execution only. Never touched by the approval flow.
+enum PublishState {
+  NOT_SCHEDULED
+  SCHEDULED
+  QUEUED
+  PUBLISHING
+  PUBLISHED
+  FAILED
+  MANUAL_PENDING // manual mode: prepared, waiting for the human
+  MANUAL_CONFIRMED // human published it and recorded the URL
+  NEEDS_RECONCILIATION // ambiguous Meta result: never auto-retry blindly
+  CANCELLED
+}
+
+enum CaptionLanguage {
+  DARIJA
+  FRENCH
+  DARIJA_FRENCH
+}
+
+enum AccountStatus {
+  ACTIVE
+  EXPIRED
+  DISCONNECTED
+}
+
+enum AssetKind {
+  IMAGE
+  VIDEO
+}
+
+enum AssetStatus {
+  PENDING
+  READY
+  INVALID
+  UPLOADING // NEW
+  PROCESSING // NEW
+}
+
+enum AssetRole {
+  MAIN
+  COVER
+  CAROUSEL
+}
+
+enum AssetSource {
+  UPLOAD
+  GOOGLE_DRIVE
+  DROPBOX
+}
+
+enum StorageProvider {
+  LOCAL
+  S3
+}
+
+/// Resumable (chunked) large-file upload session.
+enum UploadStatus {
+  OPEN
+  COMPLETED
+  CANCELLED
+  EXPIRED
+}
+
+enum PublishMode {
+  AUTO
+  MANUAL
+}
+
+enum PlanImportStatus {
+  PREVIEW
+  COMMITTED
+  FAILED // NEW
+}
+
+enum PlanImportSource {
+  CSV
+  XLSX
+  PDF
+  PPTX
+  DOCX
+  MANUAL
+}
+
+enum PlanKind {
+  DAILY
+  WEEKLY
+  MONTHLY
+  CUSTOM
+}
+
+enum AttemptState {
+  STARTED
+  SUCCEEDED
+  FAILED
+  AMBIGUOUS // timeout/unknown after request left our side
+}
+
+enum MetricSource {
+  API
+  MANUAL
+  IMPORT
+}
+
+model User {
+  id               String        @id @default(cuid())
+  email            String        @unique
+  name             String
+  passwordHash     String
+  role             Role          @default(EDITOR)
+  active           Boolean       @default(true)
+  createdAt        DateTime      @default(now())
+  posts            Post[]        @relation("PostCreator")
+  approved         Post[]        @relation("PostApprover")
+  postsConfirmed   Post[]        @relation("PostManualConfirmer")
+  contentCreated   ContentItem[] @relation("ContentCreator")
+  contentApproved  ContentItem[] @relation("ContentApprover")
+  audit            AuditLog[]
+  planImports      PlanImport[]
+  mediaUploads     MediaUpload[]
+}
+
+model Campaign {
+  id          String        @id @default(cuid())
+  slug        String        @unique
+  titleLatin  String
+  titleArabic String?
+  hashtags    String[]
+  releaseDate DateTime
+  // Free-text facts the AI is allowed to use (venue, showtimes, cinemas, handles...)
+  brief       String        @default("")
+  createdAt   DateTime      @default(now())
+
+  // NEW: campaign-level automation control. A post auto-publishes only if
+  // post.publishMode = AUTO AND approved AND autoPublishEnabled AND NOT publishingPaused.
+  autoPublishEnabled Boolean @default(false)
+  publishingPaused   Boolean @default(false)
+  timezone           String  @default("Africa/Tunis")
+
+  days         CampaignDay[]
+  posts        Post[]
+  planEntries  PlanEntry[]
+  contentItems ContentItem[]
+  planImports  PlanImport[]
+}
+
+/// DEPRECATED (contract stage): replaced by PlanEntry (many entries per date).
+/// The @@unique is kept ONLY because campaign.seed.ts and other code may
+/// upsert on campaignId_date. Do not add new readers.
+model CampaignDay {
+  id         String     @id @default(cuid())
+  campaignId String
+  campaign   Campaign   @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  date       DateTime   // midnight, campaign timezone
+  phase      String
+  label      String
+  content    String
+  execution  String
+  objective  String
+  platforms  Platform[]
+  format     PostFormat @default(REEL)
+  posts      Post[]
+
+  @@unique([campaignId, date])
+}
+
+/// NEW: a planned slot in a plan. Several per date are allowed
+/// (morning teaser, afternoon Reel, evening poster...).
+model PlanEntry {
+  id          String     @id @default(cuid())
+  campaignId  String
+  campaign    Campaign   @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  importId    String?
+  import      PlanImport? @relation(fields: [importId], references: [id], onDelete: SetNull)
+  legacyDayId String?    @unique // set when backfilled from CampaignDay
+  date        DateTime   // midnight in campaign timezone
+  timeOfDay   String?    // "HH:mm" local, optional
+  phase       String     @default("")
+  label       String
+  content     String     @default("")
+  execution   String     @default("")
+  objective   String     @default("")
+  platforms   Platform[]
+  format      PostFormat @default(REEL)
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+  contentItems ContentItem[]
+  importRows   PlanImportRow[]
+
+  @@index([campaignId, date])
+}
+
+/// NEW: the shared draft. One ContentItem -> one Post per platform.
+/// Facebook can succeed while Instagram fails without losing the content.
+model ContentItem {
+  id              String          @id @default(cuid())
+  campaignId      String?
+  campaign        Campaign?       @relation(fields: [campaignId], references: [id], onDelete: SetNull)
+  planEntryId     String?
+  planEntry       PlanEntry?      @relation(fields: [planEntryId], references: [id], onDelete: SetNull)
+  title           String
+  captionLanguage CaptionLanguage? // null = legacy / not yet classified
+  baseCaption     String          @default("")
+  hashtags        String[]
+  // Mode copied onto platform posts when they are created. Manual unless explicitly enabled.
+  defaultPublishMode PublishMode  @default(MANUAL)
+  approvalStatus  ApprovalStatus  @default(DRAFT)
+  approvedById    String?
+  approvedBy      User?           @relation("ContentApprover", fields: [approvedById], references: [id], onDelete: SetNull)
+  approvedAt      DateTime?
+  rejectionNote   String?
+  createdById     String?
+  createdBy       User?           @relation("ContentCreator", fields: [createdById], references: [id], onDelete: SetNull)
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+  assets          ContentAsset[]
+  posts           Post[]
+
+  @@index([campaignId, approvalStatus])
+}
+
+/// NEW: ordered media for a content item (carousel, cover image, video + cover).
+model ContentAsset {
+  id            String      @id @default(cuid())
+  contentItemId String
+  contentItem   ContentItem @relation(fields: [contentItemId], references: [id], onDelete: Cascade)
+  assetId       String
+  asset         Asset       @relation(fields: [assetId], references: [id], onDelete: Restrict)
+  order         Int         @default(0)
+  role          AssetRole   @default(MAIN)
+
+  @@unique([contentItemId, assetId])
+  @@index([contentItemId, order])
+}
+
+model Asset {
+  id               String      @id @default(cuid())
+  name             String
+  kind             AssetKind
+  url              String
+  mime             String?
+  /// DEPRECATED (contract stage): replaced by sizeBytesBig (files > 2 GB overflow Int).
+  sizeBytes        Int?
+  storedAs         String?     // filename on disk when uploaded (legacy local storage)
+  processingStatus AssetStatus @default(READY)
+  durationSecs     Float?      // video duration
+  widthPx          Int?
+  heightPx         Int?
+  processingNote   String?
+  createdAt        DateTime    @default(now())
+  posts            Post[]
+
+  // NEW: media pipeline
+  sizeBytesBig     BigInt?
+  storageProvider  StorageProvider @default(LOCAL)
+  storageKey       String?
+  previewKey       String?
+  checksumSha256   String?
+  source           AssetSource     @default(UPLOAD)
+  sourceUrl        String?
+  processingError  String?
+  platformReady    Json?       // per-platform compatibility result, e.g. {"INSTAGRAM_REEL":{"ok":true}}
+  folder           String?
+  tags             String[]
+  deletedAt        DateTime?   // soft delete; cleanup job removes storage later
+  contentLinks     ContentAsset[]
+
+  @@index([checksumSha256])
+  @@index([kind, createdAt])
+}
+
+/// NEW: a resumable, chunked upload session for large files. Parts are written
+/// to a temporary directory and assembled into one object on completion.
+model MediaUpload {
+  id            String       @id @default(cuid())
+  name          String
+  mime          String?
+  kind          AssetKind
+  totalBytes    BigInt?
+  receivedBytes BigInt       @default(0)
+  partCount     Int          @default(0)
+  status        UploadStatus @default(OPEN)
+  tempKey       String       // temporary directory name under the upload tmp root
+  assetId       String?      // set when the session completed into an Asset
+  createdById   String?
+  createdBy     User?        @relation(fields: [createdById], references: [id], onDelete: SetNull)
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+  expiresAt     DateTime     // sessions and orphaned parts are pruned after this
+
+  @@index([status, expiresAt])
+}
+
+model SocialAccount {
+  id             String        @id @default(cuid())
+  platform       Platform
+  externalId     String
+  name           String
+  username       String?
+  encryptedToken String
+  tokenExpiresAt DateTime?
+  status         AccountStatus @default(ACTIVE)
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+  posts          Post[]
+
+  // NEW: token/permission metadata (verification must prove capability, not just readability)
+  tokenIssuedAt     DateTime?
+  grantedScopes     String[]
+  lastVerifiedAt    DateTime?
+  lastError         String?
+  canPublish        Boolean?
+  canReadInsights   Boolean?
+  metrics           AccountMetricSnapshot[]
+
+  @@unique([platform, externalId])
+}
+
+model Post {
+  id            String        @id @default(cuid())
+  campaignId    String?
+  campaign      Campaign?     @relation(fields: [campaignId], references: [id], onDelete: SetNull)
+  dayId         String?
+  day           CampaignDay?  @relation(fields: [dayId], references: [id], onDelete: SetNull)
+  platform      Platform
+  format        PostFormat
+  caption       String
+  hashtags      String[]
+  /// DEPRECATED (contract stage): replaced by ContentItem -> ContentAsset.
+  assetId       String?
+  asset         Asset?        @relation(fields: [assetId], references: [id], onDelete: SetNull)
+  accountId     String?
+  account       SocialAccount? @relation(fields: [accountId], references: [id], onDelete: SetNull)
+  scheduledAt   DateTime?
+  // CHANGED DEFAULT: MANUAL. Existing rows keep their stored value.
+  publishMode   PublishMode   @default(MANUAL)
+  /// DEPRECATED (contract stage): replaced by approvalStatus + publishState.
+  status        PostStatus    @default(DRAFT)
+  isExternal    Boolean       @default(false)
+  createdById   String?
+  createdBy     User?         @relation("PostCreator", fields: [createdById], references: [id], onDelete: SetNull)
+  approvedById  String?
+  approvedBy    User?         @relation("PostApprover", fields: [approvedById], references: [id], onDelete: SetNull)
+  approvedAt    DateTime?
+  externalId    String?
+  externalUrl   String?
+  publishedAt   DateTime?
+  statusNote    String?
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+  attempts      PublishAttempt[]
+  metrics       MetricSnapshot[]
+  commentJobs   CommentJob[]
+
+  // NEW: shared content + language
+  contentItemId   String?
+  contentItem     ContentItem?     @relation(fields: [contentItemId], references: [id], onDelete: SetNull)
+  captionLanguage CaptionLanguage? // null = legacy / not yet classified
+
+  // NEW: separated state machines
+  approvalStatus  ApprovalStatus   @default(DRAFT)
+  publishState    PublishState     @default(NOT_SCHEDULED)
+  rejectionNote   String?
+  stateMigratedAt DateTime?        // set by backfill; makes it idempotent and observable
+
+  // NEW: manual publishing
+  manualReminderSentAt DateTime?
+  manualConfirmedAt    DateTime?
+  manualConfirmedById  String?
+  manualConfirmedBy    User?       @relation("PostManualConfirmer", fields: [manualConfirmedById], references: [id], onDelete: SetNull)
+
+  // NEW: reliability (Instagram container id persisted before publish step)
+  remoteContainerId String?
+
+  // NEW: one-off "publish now" authorization. Set when an approver explicitly
+  // publishes an approved post outside its schedule; cleared by every
+  // transition except QUEUED/PUBLISHING. Kept for audit and worker clarity.
+  publishNowAuthorizedAt DateTime?
+  publishNowAuthorizedById String?
+
+  @@index([status, scheduledAt])
+  @@index([platform, publishedAt])
+  @@index([approvalStatus, publishState, scheduledAt])
+  @@index([contentItemId])
+}
+
+model PlanImport {
+  id          String           @id @default(cuid())
+  filename    String
+  status      PlanImportStatus @default(PREVIEW)
+  rowCount    Int
+  createdById String?
+  createdBy   User?            @relation(fields: [createdById], references: [id], onDelete: SetNull)
+  createdAt   DateTime         @default(now())
+  rows        PlanImportRow[]
+
+  // NEW
+  source         PlanImportSource @default(CSV)
+  kind           PlanKind         @default(CUSTOM)
+  campaignId     String?
+  campaign       Campaign?        @relation(fields: [campaignId], references: [id], onDelete: SetNull)
+  rangeStart     DateTime?
+  rangeEnd       DateTime?
+  errorCount     Int              @default(0)
+  warningCount   Int              @default(0)
+  fileChecksum   String?          // duplicate-upload detection
+  committedAt    DateTime?
+  entries        PlanEntry[]
+
+  @@index([fileChecksum])
+}
+
+model PlanImportRow {
+  id        String     @id @default(cuid())
+  importId  String
+  import    PlanImport @relation(fields: [importId], references: [id], onDelete: Cascade)
+  rowIndex  Int
+  date      DateTime
+  phase     String
+  label     String
+  content   String
+  execution String
+  objective String
+  platforms Platform[]
+  format    PostFormat
+  error     String?    // null = valid row
+
+  // NEW
+  timeOfDay       String?
+  caption         String?
+  captionLanguage CaptionLanguage?
+  publishMode     PublishMode?
+  assetRef        String?    // filename / media reference to resolve in the library
+  warning         String?    // non-blocking: missing asset, missing caption...
+  dedupeKey       String?    // date+time+platform+label hash
+  planEntryId     String?
+  planEntry       PlanEntry? @relation(fields: [planEntryId], references: [id], onDelete: SetNull)
+
+  @@index([importId, rowIndex])
+  @@index([dedupeKey])
+}
+
+model PublishAttempt {
+  id        String   @id @default(cuid())
+  postId    String
+  post      Post     @relation(fields: [postId], references: [id], onDelete: Cascade)
+  startedAt DateTime @default(now())
+  ok        Boolean
+  error     String?
+
+  // NEW: null state = legacy row written by the old worker
+  state             AttemptState?
+  finishedAt        DateTime?
+  remoteContainerId String?
+  remoteId          String?
+  httpStatus        Int?
+  idempotencyKey    String?
+
+  @@index([postId, startedAt])
+}
+
+model MetricSnapshot {
+  id         String       @id @default(cuid())
+  postId     String
+  post       Post         @relation(fields: [postId], references: [id], onDelete: Cascade)
+  capturedAt DateTime     @default(now())
+  source     MetricSource
+  // Legacy zero-defaults kept in this stage so existing readers don't break.
+  // CONTRACT stage makes these nullable once analytics code handles null.
+  views      Int          @default(0)
+  reach      Int          @default(0)
+  likes      Int          @default(0)
+  comments   Int          @default(0)
+  shares     Int          @default(0)
+  saves      Int          @default(0)
+  clicks     Int          @default(0)
+
+  // NEW: metric names the platform did NOT return for this snapshot,
+  // e.g. ["saves","shares"]. A zero in an unavailable column is not a real zero.
+  unavailable String[]
+  fetchError  String?
+
+  @@index([postId, capturedAt])
+}
+
+/// NEW: account-level insights (followers, reach, profile views...).
+model AccountMetricSnapshot {
+  id          String        @id @default(cuid())
+  accountId   String
+  account     SocialAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  capturedAt  DateTime      @default(now())
+  source      MetricSource  @default(API)
+  followers   Int?
+  reach       Int?
+  views       Int?
+  profileViews Int?
+  engagements Int?
+  fetchError  String?
+
+  @@index([accountId, capturedAt])
+}
+
+model Setting {
+  key       String   @id
+  value     Json
+  updatedAt DateTime @updatedAt
+}
+
+enum CommentJobKind {
+  FIRST_COMMENT
+  REPLY
+  MODERATION
+}
+
+enum CommentJobStatus {
+  PENDING_APPROVAL
+  APPROVED
+  SENDING
+  SENT
+  FAILED
+  REJECTED
+  NEEDS_CHECK // outcome unknown after a timeout: check on the platform, never auto-retry
+  SKIPPED
+}
+
+model CommentJob {
+  id              String           @id @default(cuid())
+  platform        Platform
+  kind            CommentJobKind
+  status          CommentJobStatus @default(PENDING_APPROVAL)
+  postId          String?
+  post            Post?            @relation(fields: [postId], references: [id], onDelete: Cascade)
+  accountId       String?
+  remoteMediaId   String?          // the platform's media/post id
+  remoteCommentId String?          // the incoming comment (REPLY / MODERATION)
+  authorName      String?
+  incomingText    String?
+  text            String           @default("")
+  aiGenerated     Boolean          @default(false)
+  auto            Boolean          @default(false)
+  note            String?
+  error           String?
+  attempts        Int              @default(0)
+  approvedById    String?
+  approvedAt      DateTime?
+  sentAt          DateTime?
+  resultRemoteId  String?          // id of the comment we posted
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+
+  @@unique([platform, remoteCommentId])
+  @@index([status, kind, createdAt])
+  @@index([postId, kind])
+}
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  at        DateTime @default(now())
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  action    String
+  entity    String
+  entityId  String?
+  data      Json?
+
+  @@index([at])
+  @@index([entity, entityId])
+}

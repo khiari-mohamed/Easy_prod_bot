@@ -1,0 +1,4 @@
+# Keep LF everywhere: CRLF in .env files breaks Docker's env_file and leaves \r in the values.
+* text=auto eol=lf
+.env* text eol=lf
+*.sh text eol=lf

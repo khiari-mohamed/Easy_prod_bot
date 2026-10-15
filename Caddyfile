@@ -1,0 +1,17 @@
+# Automatic HTTPS (Let's Encrypt) for {$DOMAIN}. The DNS A record must point at this VPS.
+{$DOMAIN} {
+	# Media must be served straight from the API: Meta downloads videos from here.
+	handle /media/* {
+		reverse_proxy api:4000
+	}
+
+	# API goes directly too (no body-size or proxy surprises on large uploads).
+	handle_path /api/* {
+		reverse_proxy api:4000
+	}
+
+	handle {
+		encode zstd gzip
+		reverse_proxy web:3000
+	}
+}
