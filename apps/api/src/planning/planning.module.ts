@@ -8,21 +8,47 @@ import {
   Module,
   NotFoundException,
   Param,
+  Patch,
   Post,
+  Query,
+  Res,
   ServiceUnavailableException,
   UploadedFile,
   UseInterceptors,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { Throttle } from '@nestjs/throttler';
-import { CaptionLanguage, Platform, PostFormat, Prisma, PublishMode, Role } from '@prisma/client';
-import { ArrayMaxSize, IsArray, IsOptional, IsString } from 'class-validator';
+import {
+  CaptionLanguage,
+  Platform,
+  PlanActionType,
+  PlanImportRow,
+  PlanProgress,
+  PostFormat,
+  Prisma,
+  PublishMode,
+  Role,
+} from '@prisma/client';
+import {
+  ArrayMaxSize,
+  IsArray,
+  IsBoolean,
+  IsIn,
+  IsOptional,
+  IsString,
+  MaxLength,
+} from 'class-validator';
+import type { Response } from 'express';
 import { memoryStorage } from 'multer';
 import { createHash } from 'crypto';
+import { createReadStream } from 'fs';
+import { mkdir, unlink, writeFile } from 'fs/promises';
+import { basename, join } from 'path';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuditService } from '../common/audit.service';
 import { CurrentUser, Roles } from '../auth/decorators';
 import { AuthUser } from '../auth/auth.types';
+import { getEnv } from '../env';
 import { cleanTag, GeminiService, PlanRow } from '../ai/gemini.service';
 import {
   contentMatchesMime,
@@ -33,6 +59,7 @@ import {
   PlanDocMime,
   PPTX_MIME,
 } from '../ai/document-text';
+import { ACTION_TYPES, checkRow, normalizeTime, rowDedupeKey, toActionType } from './plan-rules';
 
 const PLATFORMS = new Set<string>(['FACEBOOK', 'INSTAGRAM', 'TIKTOK']);
 const FORMATS = new Set<string>(['IMAGE', 'VIDEO', 'REEL', 'STORY', 'TEXT']);
@@ -51,6 +78,7 @@ const MIME_TO_KIND: Record<PlanDocMime, ImportKind> = {
 interface ParsedRow {
   rowIndex: number;
   date: Date | null;
+  dateText: string | null;
   phase: string;
   label: string;
   content: string;
@@ -63,6 +91,10 @@ interface ParsedRow {
   captionLanguage: CaptionLanguage | null;
   publishMode: PublishMode | null;
   assetRef: string | null;
+  actionType: PlanActionType;
+  sourceRef: string | null;
+  sourceText: string | null;
+  confidence: number | null;
   error: string | null;
   warning: string | null;
   dedupeKey: string | null;
@@ -175,48 +207,41 @@ function parseCsv(buf: Buffer, tz: string): ParsedRow[] {
   });
 }
 
-function dedupe(date: Date | null, time: string | null, platforms: Platform[], label: string): string | null {
-  if (!date || !platforms.length) return null;
-  return createHash('sha256')
-    .update(`${date.toISOString()}|${time ?? ''}|${[...platforms].sort().join(',')}|${label}`)
-    .digest('hex')
-    .slice(0, 16);
-}
-
 function parseRow(col: (n: string) => string, rowIndex: number, tz: string): ParsedRow {
-  const errors: string[] = [];
-  const warnings: string[] = [];
+  const csvErrors: string[] = [];
 
   const dateStr = col('date');
   let date: Date | null = null;
   if (dateStr) {
     date = parseDay(dateStr, tz);
-    if (!date) errors.push(`Date invalide : "${dateStr}"`);
-  } else errors.push('Date manquante');
+    if (!date) csvErrors.push(`Date invalide : "${dateStr}"`);
+  }
 
   const rawPlatforms = col('platforms')
     .split(/[|,]/)
     .map((p) => p.trim().toUpperCase())
     .filter(Boolean);
   const platforms = [...new Set(rawPlatforms.filter((p) => PLATFORMS.has(p)))] as Platform[];
-  if (!platforms.length) errors.push(`Aucune plateforme valide (reçu : "${col('platforms')}")`);
+  const unknown = rawPlatforms.filter((p) => !PLATFORMS.has(p));
+  if (unknown.length) csvErrors.push(`Plateforme inconnue : ${unknown.join(', ')}`);
 
+  const actionType = toActionType(col('action_type') || col('type') || 'POST');
   const rawFormat = col('format').toUpperCase();
   const format: PostFormat = FORMATS.has(rawFormat) ? (rawFormat as PostFormat) : 'REEL';
-  if (!FORMATS.has(rawFormat)) warnings.push(`Format "${rawFormat}" inconnu, REEL par défaut`);
-
   const rawLang = col('caption_language').toUpperCase();
   const rawMode = col('publish_mode').toUpperCase();
   const caption = col('caption') || null;
   const assetRef = col('asset_ref') || col('asset') || null;
-  const timeOfDay = col('time_of_day') || col('time') || null;
-  if (!caption) warnings.push('Pas de légende : à rédiger avant publication');
-  if (!assetRef && format !== 'TEXT') warnings.push('Pas de média référencé : à joindre');
-
+  const timeRaw = col('time_of_day') || col('time') || null;
+  const timeOfDay = timeRaw ? normalizeTime(timeRaw) ?? timeRaw : null;
   const label = col('label') || col('title') || `Jour ${rowIndex}`;
+
+  const check = checkRow({ label, date, dateText: dateStr || null, timeOfDay, actionType, platforms, format, caption, assetRef });
+  const errors = [...csvErrors.filter((e) => !(date === null && e.startsWith('Date invalide'))), ...(check.error ? [check.error] : [])];
   return {
     rowIndex,
     date,
+    dateText: dateStr || null,
     phase: col('phase') || 'PHASE',
     label,
     content: col('content') || col('contenu'),
@@ -229,31 +254,39 @@ function parseRow(col: (n: string) => string, rowIndex: number, tz: string): Par
     captionLanguage: LANGUAGES.has(rawLang) ? (rawLang as CaptionLanguage) : null,
     publishMode: MODES.has(rawMode) ? (rawMode as PublishMode) : null,
     assetRef,
+    actionType,
+    sourceRef: `Ligne ${rowIndex}`,
+    sourceText: null,
+    confidence: null,
     error: errors.length ? errors.join('; ') : null,
-    warning: warnings.length ? warnings.join('; ') : null,
-    dedupeKey: dedupe(date, timeOfDay, platforms, label),
+    warning: check.warning,
+    dedupeKey: rowDedupeKey(date, timeOfDay, platforms, label, actionType),
   };
 }
 
 function aiRowToParsedRow(r: PlanRow, rowIndex: number, tz: string): ParsedRow {
-  const errors: string[] = [];
-  const warnings: string[] = [];
-
   const date = r.date ? parseDay(r.date, tz) : null;
-  if (!date) errors.push(`Date invalide : "${r.date ?? ''}"`);
-
   const platforms = [...new Set((r.platforms ?? []).map((p) => p.toUpperCase()).filter((p) => PLATFORMS.has(p)))] as Platform[];
-  if (!platforms.length) errors.push('Aucune plateforme valide');
-
+  const actionType = toActionType(r.actionType);
   const rawFormat = (r.format ?? '').toUpperCase();
   const format: PostFormat = FORMATS.has(rawFormat) ? (rawFormat as PostFormat) : 'REEL';
-  if (!FORMATS.has(rawFormat)) warnings.push(`Format "${rawFormat}" inconnu, REEL par défaut`);
-  if (!r.caption) warnings.push('Pas de légende : à rédiger avant publication');
-
-  const label = r.label || `Jour ${rowIndex}`;
+  const label = r.label || `Action ${rowIndex}`;
+  const check = checkRow({
+    label,
+    date,
+    dateText: r.dateText,
+    timeOfDay: r.timeOfDay,
+    actionType,
+    platforms,
+    format,
+    caption: r.caption,
+    assetRef: null,
+    confidence: r.confidence,
+  });
   return {
     rowIndex,
     date,
+    dateText: r.dateText,
     phase: r.phase || 'PHASE',
     label,
     content: r.content || '',
@@ -266,9 +299,13 @@ function aiRowToParsedRow(r: PlanRow, rowIndex: number, tz: string): ParsedRow {
     captionLanguage: null,
     publishMode: null,
     assetRef: null,
-    error: errors.length ? errors.join('; ') : null,
-    warning: warnings.length ? warnings.join('; ') : null,
-    dedupeKey: dedupe(date, r.timeOfDay ?? null, platforms, label),
+    actionType,
+    sourceRef: r.sourceRef,
+    sourceText: r.sourceText,
+    confidence: r.confidence,
+    error: check.error,
+    warning: check.warning,
+    dedupeKey: rowDedupeKey(date, r.timeOfDay ?? null, platforms, label, actionType),
   };
 }
 
@@ -293,7 +330,130 @@ class CommitDto {
   @IsOptional() @IsArray() @ArrayMaxSize(30) @IsString({ each: true }) addHashtags?: string[];
 }
 
+/** Fields a reviewer may correct while an import is still a PREVIEW. Every field is optional. */
+class RowDto {
+  /** YYYY-MM-DD or DD/MM/YYYY. An empty string clears the date. */
+  @IsOptional() @IsString() @MaxLength(40) date?: string;
+  @IsOptional() @IsString() @MaxLength(8) timeOfDay?: string;
+  @IsOptional() @IsString() @MaxLength(100) phase?: string;
+  @IsOptional() @IsString() @MaxLength(200) label?: string;
+  @IsOptional() @IsString() @MaxLength(2000) content?: string;
+  @IsOptional() @IsString() @MaxLength(2000) execution?: string;
+  @IsOptional() @IsString() @MaxLength(1000) objective?: string;
+  @IsOptional() @IsArray() @ArrayMaxSize(3) @IsIn([...PLATFORMS], { each: true }) platforms?: string[];
+  @IsOptional() @IsIn([...FORMATS]) format?: string;
+  @IsOptional() @IsIn(ACTION_TYPES) actionType?: string;
+  @IsOptional() @IsString() @MaxLength(2200) caption?: string;
+  @IsOptional() @IsIn([...LANGUAGES, '']) captionLanguage?: string;
+  @IsOptional() @IsIn([...MODES, '']) publishMode?: string;
+  @IsOptional() @IsString() @MaxLength(300) assetRef?: string;
+  /** The reviewer confirms this row matches the original document. */
+  @IsOptional() @IsBoolean() verified?: boolean;
+}
+
+const PROGRESS: PlanProgress[] = ['PENDING', 'DONE', 'SKIPPED', 'BLOCKED'];
+
+class ProgressDto {
+  @IsIn(PROGRESS) progress!: PlanProgress;
+  @IsOptional() @IsString() @MaxLength(500) note?: string;
+}
+
 const metaKey = (importId: string) => `planimport:${importId}`;
+const SOURCE_EXT: Record<ImportKind, string> = { CSV: 'csv', PDF: 'pdf', PPTX: 'pptx', DOCX: 'docx' };
+const SOURCE_MIME: Record<ImportKind, string> = {
+  CSV: 'text/csv',
+  PDF: PDF_MIME,
+  PPTX: PPTX_MIME,
+  DOCX: DOCX_MIME,
+};
+
+/** The fields a reviewer can change, as stored in `original` (the extraction before any human edit). */
+function snapshot(r: PlanImportRow): Record<string, unknown> {
+  return {
+    date: r.date ? r.date.toISOString() : null,
+    dateText: r.dateText,
+    timeOfDay: r.timeOfDay,
+    phase: r.phase,
+    label: r.label,
+    content: r.content,
+    execution: r.execution,
+    objective: r.objective,
+    platforms: r.platforms,
+    format: r.format,
+    actionType: r.actionType,
+    caption: r.caption,
+    captionLanguage: r.captionLanguage,
+    publishMode: r.publishMode,
+    assetRef: r.assetRef,
+  };
+}
+
+type RowFields = Pick<
+  PlanImportRow,
+  | 'date'
+  | 'dateText'
+  | 'timeOfDay'
+  | 'phase'
+  | 'label'
+  | 'content'
+  | 'execution'
+  | 'objective'
+  | 'platforms'
+  | 'format'
+  | 'actionType'
+  | 'caption'
+  | 'captionLanguage'
+  | 'publishMode'
+  | 'assetRef'
+>;
+
+/** Applies a reviewer's edit on top of the current row, then re-runs every verification rule. */
+export function mergeRow(cur: RowFields, dto: RowDto, tz: string) {
+  let date = cur.date;
+  let dateText = cur.dateText;
+  if (dto.date !== undefined) {
+    const typed = dto.date.trim();
+    if (!typed) date = null;
+    else {
+      date = parseDay(typed, tz);
+      if (!date) dateText = typed; // keep what they typed so the error message can quote it
+    }
+  }
+
+  let timeOfDay = cur.timeOfDay;
+  if (dto.timeOfDay !== undefined) {
+    const typed = dto.timeOfDay.trim();
+    timeOfDay = typed ? normalizeTime(typed) ?? typed : null;
+  }
+
+  const empty = (v: string | undefined) => (v === undefined ? undefined : v.trim() || null);
+  const platforms = (dto.platforms ? [...new Set(dto.platforms)] : cur.platforms) as Platform[];
+  const next = {
+    date,
+    dateText,
+    timeOfDay,
+    phase: dto.phase ?? cur.phase,
+    label: dto.label !== undefined ? dto.label.trim() : cur.label,
+    content: dto.content ?? cur.content,
+    execution: dto.execution ?? cur.execution,
+    objective: dto.objective ?? cur.objective,
+    platforms,
+    format: (dto.format ?? cur.format) as PostFormat,
+    actionType: (dto.actionType ?? cur.actionType) as PlanActionType,
+    caption: dto.caption !== undefined ? empty(dto.caption) ?? null : cur.caption,
+    captionLanguage: (dto.captionLanguage !== undefined ? empty(dto.captionLanguage) ?? null : cur.captionLanguage) as CaptionLanguage | null,
+    publishMode: (dto.publishMode !== undefined ? empty(dto.publishMode) ?? null : cur.publishMode) as PublishMode | null,
+    assetRef: dto.assetRef !== undefined ? empty(dto.assetRef) ?? null : cur.assetRef,
+  };
+  // The extraction confidence no longer applies once a human has looked at the row.
+  const check = checkRow({ ...next, confidence: null });
+  return {
+    ...next,
+    error: check.error,
+    warning: check.warning,
+    dedupeKey: rowDedupeKey(next.date, next.timeOfDay, next.platforms, next.label, next.actionType),
+  };
+}
 
 @Controller('planning')
 export class PlanningController {
@@ -304,6 +464,15 @@ export class PlanningController {
     private readonly audit: AuditService,
     private readonly gemini: GeminiService,
   ) {}
+
+  private sourceDir() {
+    return join(getEnv().UPLOAD_DIR, 'plans');
+  }
+
+  private async campaignTz(): Promise<string> {
+    const c = await this.prisma.campaign.findFirst({ orderBy: { createdAt: 'desc' }, select: { timezone: true } });
+    return c?.timezone ?? DEFAULT_TZ;
+  }
 
   @Get('imports')
   listImports() {
@@ -322,7 +491,30 @@ export class PlanningController {
     });
     if (!imp) throw new NotFoundException();
     const meta = await this.prisma.setting.findUnique({ where: { key: metaKey(id) } });
-    return { ...imp, meta: meta?.value ?? null };
+    return { ...imp, hasSource: !!imp.sourcePath, meta: meta?.value ?? null };
+  }
+
+  /** The original uploaded file, for side-by-side verification. Only PDFs are shown inline. */
+  @Get('imports/:id/source')
+  async source(@Param('id') id: string, @Res() res: Response) {
+    const imp = await this.prisma.planImport.findUnique({ where: { id } });
+    if (!imp?.sourcePath) throw new NotFoundException('Fichier original indisponible');
+    const path = join(this.sourceDir(), basename(imp.sourcePath));
+    const mime = imp.sourceMime ?? 'application/octet-stream';
+    const inline = mime === PDF_MIME;
+    res.setHeader('Content-Type', mime);
+    res.setHeader(
+      'Content-Disposition',
+      `${inline ? 'inline' : 'attachment'}; filename*=UTF-8''${encodeURIComponent(imp.filename)}`,
+    );
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Cache-Control', 'private, no-store');
+    const stream = createReadStream(path);
+    stream.on('error', () => {
+      if (!res.headersSent) res.status(404).end();
+      else res.destroy();
+    });
+    stream.pipe(res);
   }
 
   @Throttle({ default: { limit: 10, ttl: 60_000 } })
@@ -366,7 +558,17 @@ export class PlanningController {
         throw new BadRequestException('Le contenu du fichier ne correspond pas à son extension.');
       }
       source = MIME_TO_KIND[docMime];
-      const extracted = await this.extract(file.buffer, docMime, campaign?.releaseDate.toISOString().slice(0, 10));
+
+      // Campaign window: only used by the AI to expand explicitly recurring items.
+      const firstDay = campaign
+        ? await this.prisma.campaignDay.findFirst({ where: { campaignId: campaign.id }, orderBy: { date: 'asc' }, select: { date: true } })
+        : null;
+      const releaseMs = campaign?.releaseDate.getTime();
+      const extracted = await this.extract(file.buffer, docMime, {
+        releaseDate: campaign?.releaseDate.toISOString().slice(0, 10),
+        windowStart: (firstDay?.date ?? new Date()).toISOString().slice(0, 10),
+        windowEnd: releaseMs ? new Date(releaseMs + 30 * 24 * 3600_000).toISOString().slice(0, 10) : undefined,
+      });
       rows = extracted.rows.map((r, i) => aiRowToParsedRow(r, i + 1, tz));
       warnings = extracted.warnings;
       documentHashtags = extracted.documentHashtags;
@@ -388,30 +590,55 @@ export class PlanningController {
         errorCount,
         warningCount,
         createdById: user.id,
+        sourceMime: SOURCE_MIME[source],
         rows: {
-          create: rows.map((r) => ({
-            rowIndex: r.rowIndex,
-            date: r.date ?? new Date(),
-            phase: r.phase,
-            label: r.label,
-            content: r.content,
-            execution: r.execution,
-            objective: r.objective,
-            platforms: r.platforms,
-            format: r.format,
-            timeOfDay: r.timeOfDay,
-            caption: r.caption,
-            captionLanguage: r.captionLanguage,
-            publishMode: r.publishMode,
-            assetRef: r.assetRef,
-            error: r.error,
-            warning: r.warning,
-            dedupeKey: r.dedupeKey,
-          })),
+          create: rows.map((r) => {
+            const base = {
+              date: r.date,
+              dateText: r.dateText,
+              timeOfDay: r.timeOfDay,
+              phase: r.phase,
+              label: r.label,
+              content: r.content,
+              execution: r.execution,
+              objective: r.objective,
+              platforms: r.platforms,
+              format: r.format,
+              actionType: r.actionType,
+              caption: r.caption,
+              captionLanguage: r.captionLanguage,
+              publishMode: r.publishMode,
+              assetRef: r.assetRef,
+            };
+            return {
+              rowIndex: r.rowIndex,
+              ...base,
+              sourceRef: r.sourceRef,
+              sourceText: r.sourceText,
+              confidence: r.confidence,
+              error: r.error,
+              warning: r.warning,
+              dedupeKey: r.dedupeKey,
+              // The untouched extraction, kept apart from the reviewer's corrections.
+              original: { ...base, date: r.date ? r.date.toISOString() : null } as Prisma.InputJsonValue,
+            };
+          }),
         },
       },
       include: { rows: { orderBy: { rowIndex: 'asc' } } },
     });
+
+    // Keep the original file so the reviewer can compare it with the extracted rows.
+    let sourcePath: string | null = null;
+    try {
+      await mkdir(this.sourceDir(), { recursive: true });
+      sourcePath = `${imp.id}.${SOURCE_EXT[source]}`;
+      await writeFile(join(this.sourceDir(), sourcePath), file.buffer);
+      await this.prisma.planImport.update({ where: { id: imp.id }, data: { sourcePath } });
+    } catch (e) {
+      sourcePath = null;
+      this.log.warn(`Could not keep the original plan file: ${(e as Error).message}`);
+    }
 
     if (warnings.length || documentHashtags.length) {
       const value = { warnings, documentHashtags } as Prisma.InputJsonValue;
@@ -428,12 +655,12 @@ export class PlanningController {
       warningCount,
       source,
     });
-    return { ...imp, meta: { warnings, documentHashtags } };
+    return { ...imp, sourcePath, hasSource: !!sourcePath, meta: { warnings, documentHashtags } };
   }
 
-  private async extract(buf: Buffer, mime: PlanDocMime, releaseDate?: string) {
+  private async extract(buf: Buffer, mime: PlanDocMime, ctx: Parameters<GeminiService['extractPlanDetailed']>[2]) {
     try {
-      return await this.gemini.extractPlanDetailed(buf, mime, { releaseDate });
+      return await this.gemini.extractPlanDetailed(buf, mime, ctx);
     } catch (e) {
       const msg = (e as Error).message;
       this.log.warn(`Plan extraction failed: ${msg}`);
@@ -444,10 +671,149 @@ export class PlanningController {
     }
   }
 
+  // ---------------------------------------------------------------- verification stage
+
+  private async editable(importId: string) {
+    const imp = await this.prisma.planImport.findUnique({ where: { id: importId } });
+    if (!imp) throw new NotFoundException();
+    if (imp.status !== 'PREVIEW') throw new BadRequestException('Import déjà validé : modification impossible.');
+    return imp;
+  }
+
+  private async refreshCounts(importId: string) {
+    const [rowCount, errorCount, warningCount] = await Promise.all([
+      this.prisma.planImportRow.count({ where: { importId } }),
+      this.prisma.planImportRow.count({ where: { importId, error: { not: null } } }),
+      this.prisma.planImportRow.count({ where: { importId, error: null, warning: { not: null } } }),
+    ]);
+    await this.prisma.planImport.update({ where: { id: importId }, data: { rowCount, errorCount, warningCount } });
+  }
+
+  /** Correct an extracted row. Every rule runs again; the original extraction is kept untouched. */
+  @Patch('imports/:id/rows/:rowId')
+  async editRow(@Param('id') id: string, @Param('rowId') rowId: string, @Body() dto: RowDto, @CurrentUser() user: AuthUser) {
+    await this.editable(id);
+    const row = await this.prisma.planImportRow.findFirst({ where: { id: rowId, importId: id } });
+    if (!row) throw new NotFoundException();
+
+    const { verified, ...fields } = dto;
+    const changesContent = Object.values(fields).some((v) => v !== undefined);
+    const merged = mergeRow(row, dto, await this.campaignTz());
+    const updated = await this.prisma.planImportRow.update({
+      where: { id: rowId },
+      data: {
+        ...merged,
+        edited: row.edited || changesContent,
+        original: row.original ?? (changesContent ? (snapshot(row) as Prisma.InputJsonValue) : undefined),
+        // A row that still has an error can never count as verified.
+        verified: merged.error ? false : (verified ?? row.verified),
+      },
+    });
+    await this.refreshCounts(id);
+    await this.audit.log(user.id, 'planning.editRow', 'PlanImportRow', rowId, { importId: id, fields: Object.keys(fields) });
+    return updated;
+  }
+
+  /** Add an action the extraction missed. */
+  @Post('imports/:id/rows')
+  async addRow(@Param('id') id: string, @Body() dto: RowDto, @CurrentUser() user: AuthUser) {
+    await this.editable(id);
+    const blank: RowFields = {
+      date: null,
+      dateText: null,
+      timeOfDay: null,
+      phase: 'PHASE',
+      label: '',
+      content: '',
+      execution: '',
+      objective: '',
+      platforms: [],
+      format: 'REEL',
+      actionType: 'POST',
+      caption: null,
+      captionLanguage: null,
+      publishMode: null,
+      assetRef: null,
+    };
+    const merged = mergeRow(blank, dto, await this.campaignTz());
+    const last = await this.prisma.planImportRow.aggregate({ where: { importId: id }, _max: { rowIndex: true } });
+    const row = await this.prisma.planImportRow.create({
+      data: {
+        importId: id,
+        rowIndex: (last._max.rowIndex ?? 0) + 1,
+        ...merged,
+        sourceRef: 'Ajouté manuellement',
+        edited: true,
+        verified: !merged.error && dto.verified === true,
+      },
+    });
+    await this.refreshCounts(id);
+    await this.audit.log(user.id, 'planning.addRow', 'PlanImportRow', row.id, { importId: id });
+    return row;
+  }
+
+  @Delete('imports/:id/rows/:rowId')
+  async deleteRow(@Param('id') id: string, @Param('rowId') rowId: string, @CurrentUser() user: AuthUser) {
+    await this.editable(id);
+    const gone = await this.prisma.planImportRow.deleteMany({ where: { id: rowId, importId: id } });
+    if (gone.count === 0) throw new NotFoundException();
+    await this.refreshCounts(id);
+    await this.audit.log(user.id, 'planning.deleteRow', 'PlanImportRow', rowId, { importId: id });
+    return { ok: true };
+  }
+
+  /** Put a row back exactly as the extraction produced it. */
+  @Post('imports/:id/rows/:rowId/reset')
+  async resetRow(@Param('id') id: string, @Param('rowId') rowId: string, @CurrentUser() user: AuthUser) {
+    await this.editable(id);
+    const row = await this.prisma.planImportRow.findFirst({ where: { id: rowId, importId: id } });
+    if (!row) throw new NotFoundException();
+    const o = row.original as Record<string, any> | null;
+    if (!o) return row; // never edited
+    const restored: RowFields = {
+      date: o.date ? new Date(o.date) : null,
+      dateText: o.dateText ?? null,
+      timeOfDay: o.timeOfDay ?? null,
+      phase: o.phase ?? '',
+      label: o.label ?? '',
+      content: o.content ?? '',
+      execution: o.execution ?? '',
+      objective: o.objective ?? '',
+      platforms: o.platforms ?? [],
+      format: o.format ?? 'REEL',
+      actionType: o.actionType ?? 'POST',
+      caption: o.caption ?? null,
+      captionLanguage: o.captionLanguage ?? null,
+      publishMode: o.publishMode ?? null,
+      assetRef: o.assetRef ?? null,
+    };
+    const merged = mergeRow(restored, {}, await this.campaignTz());
+    const updated = await this.prisma.planImportRow.update({
+      where: { id: rowId },
+      data: { ...merged, edited: false, verified: false, original: Prisma.DbNull },
+    });
+    await this.refreshCounts(id);
+    await this.audit.log(user.id, 'planning.resetRow', 'PlanImportRow', rowId, { importId: id });
+    return updated;
+  }
+
+  /** Mark every row without an error as checked against the document. */
+  @Post('imports/:id/verify-all')
+  async verifyAll(@Param('id') id: string, @CurrentUser() user: AuthUser) {
+    await this.editable(id);
+    const r = await this.prisma.planImportRow.updateMany({ where: { importId: id, error: null }, data: { verified: true } });
+    await this.audit.log(user.id, 'planning.verifyAll', 'PlanImport', id, { rows: r.count });
+    return { ok: true, verified: r.count };
+  }
+
+  // ---------------------------------------------------------------- commit
+
   /**
-   * Commit a PREVIEW import in ONE transaction: claims the import first (so two simultaneous commits
-   * cannot both run), then creates PlanEntry + legacy CampaignDay, and a DRAFT ContentItem for rows that
-   * carry a caption. Rows with errors are skipped. Nothing here publishes anything.
+   * Approve a verified PREVIEW import in ONE transaction. It refuses while any row still has an error or
+   * has not been marked as verified, so nothing is silently dropped or imported unchecked.
+   * POST rows become plan entries (plus the legacy calendar day and a DRAFT content item when a caption
+   * was supplied). Comments, engagement, sponsoring, preparation and reporting become plan entries only:
+   * tasks on the calendar, never social posts. Nothing here publishes anything.
    */
   @Post('imports/:id/commit')
   @Roles(Role.APPROVER)
@@ -462,8 +828,20 @@ export class PlanningController {
     const campaign = await this.prisma.campaign.findFirst({ orderBy: { createdAt: 'desc' } });
     if (!campaign) throw new BadRequestException('Aucune campagne. Créez-en une d’abord.');
 
-    const validRows = imp.rows.filter((r) => !r.error);
-    if (!validRows.length) throw new BadRequestException('Aucune ligne valide à valider');
+    if (!imp.rows.length) throw new BadRequestException('Aucune ligne à valider');
+    const withError = imp.rows.filter((r) => r.error);
+    if (withError.length) {
+      throw new BadRequestException(
+        `${withError.length} ligne(s) en erreur (n° ${withError.map((r) => r.rowIndex).join(', ')}) : corrigez-les d’après le document ou supprimez-les avant de valider.`,
+      );
+    }
+    const unverified = imp.rows.filter((r) => !r.verified);
+    if (unverified.length) {
+      throw new BadRequestException(
+        `${unverified.length} ligne(s) non vérifiée(s) (n° ${unverified.map((r) => r.rowIndex).join(', ')}) : comparez-les avec le document puis cochez « Vérifié ».`,
+      );
+    }
+    const validRows = imp.rows;
 
     const addTags = [...new Set((dto?.addHashtags ?? []).map(cleanTag).filter(Boolean))];
 
@@ -478,9 +856,11 @@ export class PlanningController {
         let created = 0;
         let skipped = 0;
         let drafts = 0;
+        let tasks = 0;
         const seen = new Set<string>();
 
         for (const row of validRows) {
+          const date = row.date!; // rows without a date carry an error and were refused above
           if (row.dedupeKey) {
             if (seen.has(row.dedupeKey)) {
               skipped++;
@@ -501,11 +881,12 @@ export class PlanningController {
             }
           }
 
+          const isPost = row.actionType === 'POST';
           const entry = await tx.planEntry.create({
             data: {
               campaignId: campaign.id,
               importId: imp.id,
-              date: row.date,
+              date,
               timeOfDay: row.timeOfDay,
               phase: row.phase,
               label: row.label,
@@ -514,21 +895,31 @@ export class PlanningController {
               objective: row.objective,
               platforms: row.platforms,
               format: row.format,
+              actionType: row.actionType,
+              text: row.caption,
+              sourceRef: row.sourceRef,
+              sourceText: row.sourceText,
             },
           });
           await tx.planImportRow.update({ where: { id: row.id }, data: { planEntryId: entry.id } });
 
+          if (!isPost) {
+            tasks++;
+            created++;
+            continue;
+          }
+
           // Legacy calendar day: match anywhere inside this local day so a seeded day is never duplicated.
-          const dayEnd = new Date(row.date.getTime() + 24 * 3600_000);
+          const dayEnd = new Date(date.getTime() + 24 * 3600_000);
           const existingDay = await tx.campaignDay.findFirst({
-            where: { campaignId: campaign.id, date: { gte: row.date, lt: dayEnd } },
+            where: { campaignId: campaign.id, date: { gte: date, lt: dayEnd } },
             select: { id: true },
           });
           if (!existingDay) {
             await tx.campaignDay.create({
               data: {
                 campaignId: campaign.id,
-                date: row.date,
+                date,
                 phase: row.phase,
                 label: row.label,
                 content: row.content,
@@ -565,13 +956,51 @@ export class PlanningController {
           await tx.campaign.update({ where: { id: campaign.id }, data: { hashtags: merged } });
         }
 
-        return { created, skipped, drafts };
+        return { created, skipped, drafts, tasks };
       },
       { timeout: 60_000, maxWait: 10_000 },
     );
 
     await this.audit.log(user.id, 'planning.commit', 'PlanImport', id, { ...result, addedHashtags: addTags });
     return { ok: true, ...result };
+  }
+
+  // ---------------------------------------------------------------- calendar side
+
+  /** Approved plan actions (posts AND tasks) for the calendar. `from` / `to` are YYYY-MM-DD, inclusive. */
+  @Get('entries')
+  async entries(@Query('from') from?: string, @Query('to') to?: string) {
+    const tz = await this.campaignTz();
+    const start = from ? parseDay(from, tz) : null;
+    const end = to ? parseDay(to, tz) : null;
+    return this.prisma.planEntry.findMany({
+      where: {
+        ...(start || end
+          ? { date: { ...(start ? { gte: start } : {}), ...(end ? { lt: new Date(end.getTime() + 24 * 3600_000) } : {}) } }
+          : {}),
+      },
+      orderBy: [{ date: 'asc' }, { timeOfDay: 'asc' }],
+      take: 2000,
+      include: { contentItems: { select: { id: true, approvalStatus: true } } },
+    });
+  }
+
+  /** Track an approved plan action: pending, done, skipped or blocked. */
+  @Patch('entries/:id/progress')
+  async setProgress(@Param('id') id: string, @Body() dto: ProgressDto, @CurrentUser() user: AuthUser) {
+    const entry = await this.prisma.planEntry.findUnique({ where: { id }, select: { id: true } });
+    if (!entry) throw new NotFoundException();
+    const updated = await this.prisma.planEntry.update({
+      where: { id },
+      data: {
+        progress: dto.progress,
+        progressNote: dto.note?.trim() || null,
+        progressAt: dto.progress === 'PENDING' ? null : new Date(),
+        progressById: dto.progress === 'PENDING' ? null : user.id,
+      },
+    });
+    await this.audit.log(user.id, 'planning.progress', 'PlanEntry', id, { progress: dto.progress });
+    return updated;
   }
 
   @Delete('imports/:id')
@@ -581,6 +1010,7 @@ export class PlanningController {
     if (!imp) throw new NotFoundException();
     await this.prisma.planImport.delete({ where: { id } });
     await this.prisma.setting.deleteMany({ where: { key: metaKey(id) } });
+    if (imp.sourcePath) await unlink(join(this.sourceDir(), basename(imp.sourcePath))).catch(() => undefined);
     await this.audit.log(user.id, 'planning.deleteImport', 'PlanImport', id);
     return { ok: true };
   }

@@ -23,14 +23,14 @@ interface Job {
 }
 
 const FEATURES = [
-  ['firstComment', 'Premier commentaire', 'Après publication, poste les hashtags en commentaire (posts publiés par le bot, à partir de l'activation).'],
-  ['aiReply', 'Réponses IA avec validation', 'Lit les commentaires, propose une réponse et attend l'approbation d'un humain.'],
+  ['firstComment', 'Premier commentaire', "Après publication, poste les hashtags en commentaire (posts publiés par le bot, à partir de l'activation)."],
+  ['aiReply', 'Réponses IA avec validation', "Lit les commentaires, propose une réponse et attend l'approbation d'un humain."],
   ['autoReply', 'Réponses automatiques', 'Envoie sans validation les réponses jugées sûres. Les autres passent en validation.'],
   ['moderation', 'Modération', 'Masque (ou supprime) les commentaires avec un mot interdit ou un lien.'],
 ] as const;
 
 const TABS: [string, string][] = [
-  ['PENDING_APPROVAL', 'À valider'], ['NEEDS_CHECK', 'À vérifier'], ['APPROVED', 'En attente d'envoi'],
+  ['PENDING_APPROVAL', 'À valider'], ['NEEDS_CHECK', 'À vérifier'], ['APPROVED', "En attente d'envoi"],
   ['SENT', 'Envoyés'], ['FAILED', 'Échecs'], ['SKIPPED', 'À traiter à la main'], ['REJECTED', 'Rejetés'],
 ];
 const KIND: Record<Job['kind'], string> = { FIRST_COMMENT: 'Premier commentaire', REPLY: 'Réponse', MODERATION: 'Modération' };

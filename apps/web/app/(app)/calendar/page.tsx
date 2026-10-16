@@ -5,7 +5,7 @@ import { useRouter } from 'next/navigation';
 import { useMemo, useState } from 'react';
 import { api, useFetch } from '@/lib/api';
 import { fmtDay, fromInputValue, toInputValue } from '@/lib/format';
-import type { Campaign, CampaignDay, Me, Platform, Post, PostFormat } from '@/lib/types';
+import type { Campaign, CampaignDay, Me, PlanEntry, PlanProgress, Platform, Post, PostFormat } from '@/lib/types';
 import { EmptyState, ErrorNote, Loading, ModeTag, PageTitle, PlatformTag, StatusBadge, platformDot, statusDot } from '@/components/ui';
 
 const TZ = 'Africa/Tunis';
@@ -39,6 +39,68 @@ const postDay = (p: Post): string | null => {
 
 /** Reschedule is only offered where the API accepts it. Failed / manual posts go back to validation. */
 const RESCHEDULABLE = ['APPROVED', 'FAILED', 'MANUAL_REQUIRED'];
+const ACTION_LABEL: Record<string, string> = {
+  POST: 'Publication',
+  COMMENT: 'Commentaire',
+  ENGAGEMENT: 'Engagement',
+  SPONSORING: 'Sponsoring',
+  PREPARATION: 'Préparation',
+  REPORTING: 'Reporting',
+  OTHER: 'Autre',
+};
+const PROGRESS_LABEL: Record<PlanProgress, string> = { PENDING: 'À faire', DONE: 'Fait', SKIPPED: 'Ignoré', BLOCKED: 'Bloqué' };
+const PROGRESS_DOT: Record<PlanProgress, string> = { PENDING: 'bg-amber-400', DONE: 'bg-emerald-500', SKIPPED: 'bg-neutral-300', BLOCKED: 'bg-red-500' };
+
+/** One approved plan action (post or task) with its progress. */
+function PlanTask({ entry, onChange }: { entry: PlanEntry; onChange: () => void }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function setProgress(progress: PlanProgress) {
+    setBusy(true);
+    setError(null);
+    try {
+      await api(`/planning/entries/${entry.id}/progress`, { method: 'PATCH', body: { progress } });
+      onChange();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <li className="rounded-lg border border-line p-3">
+      <div className="flex flex-wrap items-center gap-1.5">
+        {entry.timeOfDay && <span className="text-sm font-semibold tabular-nums">{entry.timeOfDay}</span>}
+        <span className="rounded-full bg-neutral-100 px-2 py-0.5 text-xs font-semibold">{ACTION_LABEL[entry.actionType] ?? entry.actionType}</span>
+        {entry.platforms.map((p) => <PlatformTag key={p} platform={p} />)}
+        <span className="ml-auto flex items-center gap-1 text-xs text-neutral-600">
+          <span className={`h-2 w-2 rounded-full ${PROGRESS_DOT[entry.progress]}`} aria-hidden />
+          {PROGRESS_LABEL[entry.progress]}
+        </span>
+      </div>
+      <p className="mt-1 text-sm font-medium" dir="auto">{entry.label}</p>
+      {(entry.text || entry.execution || entry.content) && (
+        <p className="mt-0.5 line-clamp-3 whitespace-pre-wrap text-xs text-neutral-600" dir="auto">{entry.text || entry.execution || entry.content}</p>
+      )}
+      {entry.sourceRef && <p className="mt-0.5 text-[11px] text-neutral-400">Source : {entry.sourceRef}</p>}
+      <div className="mt-2 flex flex-wrap gap-1.5">
+        {(Object.keys(PROGRESS_LABEL) as PlanProgress[]).map((p) => (
+          <button
+            key={p}
+            className={`rounded-full border px-2 py-0.5 text-xs ${entry.progress === p ? 'bg-ink text-white' : 'bg-white hover:bg-neutral-50'}`}
+            disabled={busy || entry.progress === p}
+            onClick={() => setProgress(p)}
+          >
+            {PROGRESS_LABEL[p]}
+          </button>
+        ))}
+      </div>
+      <ErrorNote message={error} />
+    </li>
+  );
+}
 
 function Reschedule({ post, onDone }: { post: Post; onDone: () => void }) {
   const [when, setWhen] = useState(toInputValue(post.scheduledAt));
@@ -74,12 +136,14 @@ function DayPanel({
   dayKey,
   campaignDay,
   posts,
+  entries,
   isApprover,
   onChange,
 }: {
   dayKey: string;
   campaignDay: CampaignDay | undefined;
   posts: Post[];
+  entries: PlanEntry[];
   isApprover: boolean;
   onChange: () => void;
 }) {
@@ -155,6 +219,14 @@ function DayPanel({
         </div>
       )}
 
+      {entries.length > 0 && (
+        <div>
+          <h3 className="mb-1.5 text-sm font-semibold">Plan du jour <span className="font-normal text-neutral-400">{entries.length}</span></h3>
+          <ul className="space-y-2.5">
+            {entries.map((e) => <PlanTask key={e.id} entry={e} onChange={onChange} />)}
+          </ul>
+        </div>
+      )}
       {sorted.length === 0 ? (
         <p className="text-sm text-neutral-500">Aucun post ce jour-là.</p>
       ) : (
@@ -209,6 +281,7 @@ function Chip({ p }: { p: Post }) {
 export default function CalendarPage() {
   const posts = useFetch<Post[]>('/posts');
   const campaign = useFetch<Campaign>('/campaign');
+  const entries = useFetch<PlanEntry[]>('/planning/entries');
   const me = useFetch<Me>('/auth/me');
   const today = dayKeyOf(new Date());
   const [cursor, setCursor] = useState(today);
@@ -232,12 +305,21 @@ export default function CalendarPage() {
     return m;
   }, [campaign.data]);
 
+  const entriesByDay = useMemo(() => {
+    const m = new Map<string, PlanEntry[]>();
+    for (const e of entries.data ?? []) {
+      const k = dayKeyOf(new Date(e.date));
+      m.set(k, [...(m.get(k) ?? []), e]);
+    }
+    return m;
+  }, [entries.data]);
+
   if (posts.loading || campaign.loading) return <Loading />;
 
   const isApprover = me.data?.role === 'ADMIN' || me.data?.role === 'APPROVER';
   const releaseKey = campaign.data ? dayKeyOf(new Date(campaign.data.releaseDate)) : null;
   const undated = (posts.data ?? []).filter((p) => p.status !== 'CANCELLED' && !postDay(p));
-  const reload = () => { posts.reload(); campaign.reload(); };
+  const reload = () => { posts.reload(); campaign.reload(); entries.reload(); };
 
   const step = (n: number) => setCursor(view === 'month' ? addMonths(cursor, n) : addDays(cursor, 7 * n));
   const goToday = () => { setCursor(today); setSelected(today); };
@@ -271,7 +353,7 @@ export default function CalendarPage() {
           ))}
         </div>
       </PageTitle>
-      <ErrorNote message={posts.error ?? campaign.error} />
+      <ErrorNote message={posts.error ?? campaign.error ?? entries.error} />
 
       <div className="grid gap-4 lg:grid-cols-[1fr_340px]">
         <section className="card !p-0 overflow-hidden">
@@ -291,6 +373,7 @@ export default function CalendarPage() {
           <div className="grid grid-cols-7">
             {days.map((k) => {
               const list = byDay.get(k) ?? [];
+              const tasks = (entriesByDay.get(k) ?? []).filter((e) => e.actionType !== 'POST');
               const cd = campaignDays.get(k);
               const outside = view === 'month' && k.slice(0, 7) !== cursor.slice(0, 7);
               const sel = k === selected;
@@ -318,6 +401,13 @@ export default function CalendarPage() {
                   <div className="space-y-0.5">
                     {list.slice(0, max).map((p) => <Chip key={p.id} p={p} />)}
                     {list.length > max && <span className="block px-1 text-[11px] text-neutral-500">+{list.length - max}</span>}
+                    {tasks.slice(0, 2).map((e) => (
+                      <span key={e.id} className="flex items-center gap-1 truncate rounded bg-violet-50 px-1 py-0.5 text-[11px] leading-4 text-violet-900" title={`${ACTION_LABEL[e.actionType]} · ${PROGRESS_LABEL[e.progress]}`}>
+                        <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${PROGRESS_DOT[e.progress]}`} aria-hidden />
+                        <span className="truncate">{e.timeOfDay ? `${e.timeOfDay} ` : ''}{ACTION_LABEL[e.actionType]}</span>
+                      </span>
+                    ))}
+                    {tasks.length > 2 && <span className="block px-1 text-[11px] text-neutral-500">+{tasks.length - 2} tâche(s)</span>}
                   </div>
                 </div>
               );
@@ -335,6 +425,7 @@ export default function CalendarPage() {
           dayKey={selected}
           campaignDay={campaignDays.get(selected)}
           posts={byDay.get(selected) ?? []}
+          entries={entriesByDay.get(selected) ?? []}
           isApprover={isApprover}
           onChange={reload}
         />

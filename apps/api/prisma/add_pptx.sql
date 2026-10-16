@@ -1,1 +1,0 @@
-ALTER TYPE "PlanImportSource" ADD VALUE IF NOT EXISTS 'PPTX';

@@ -143,6 +143,25 @@ enum PlanImportSource {
   MANUAL
 }
 
+/// What a planned action is. Only POST becomes a social post draft; the others are tasks.
+enum PlanActionType {
+  POST
+  COMMENT
+  ENGAGEMENT
+  SPONSORING
+  PREPARATION
+  REPORTING
+  OTHER
+}
+
+/// Execution progress of an approved plan action.
+enum PlanProgress {
+  PENDING
+  DONE
+  SKIPPED
+  BLOCKED
+}
+
 enum PlanKind {
   DAILY
   WEEKLY
@@ -248,7 +267,18 @@ model PlanEntry {
   contentItems ContentItem[]
   importRows   PlanImportRow[]
 
+  // Planning v2: action type, exact text, source reference and progress
+  actionType   PlanActionType @default(POST)
+  text         String?        // exact caption / comment text supplied by the plan
+  sourceRef    String?        // "Page 2", "Slide 4"...
+  sourceText   String?        // original wording in the document
+  progress     PlanProgress   @default(PENDING)
+  progressNote String?
+  progressAt   DateTime?
+  progressById String?
+
   @@index([campaignId, date])
+  @@index([actionType, progress])
 }
 
 /// NEW: the shared draft. One ContentItem -> one Post per platform.
@@ -467,6 +497,8 @@ model PlanImport {
   fileChecksum   String?          // duplicate-upload detection
   committedAt    DateTime?
   entries        PlanEntry[]
+  sourcePath     String?          // original uploaded file, kept for side-by-side verification
+  sourceMime     String?
 
   @@index([fileChecksum])
 }
@@ -476,7 +508,7 @@ model PlanImportRow {
   importId  String
   import    PlanImport @relation(fields: [importId], references: [id], onDelete: Cascade)
   rowIndex  Int
-  date      DateTime
+  date      DateTime?  // null = the document did not give a usable date: a human must set it
   phase     String
   label     String
   content   String
@@ -496,6 +528,16 @@ model PlanImportRow {
   dedupeKey       String?    // date+time+platform+label hash
   planEntryId     String?
   planEntry       PlanEntry? @relation(fields: [planEntryId], references: [id], onDelete: SetNull)
+
+  // Planning v2: verification stage
+  actionType      PlanActionType @default(POST)
+  sourceRef       String?    // "Page 2", "Slide 4", "Tableau 1"
+  sourceText      String?    // wording found in the original document
+  dateText        String?    // date exactly as written in the document
+  confidence      Float?     // 0..1, as reported by the extraction
+  verified        Boolean    @default(false)
+  edited          Boolean    @default(false)
+  original        Json?      // snapshot of the extraction before any human edit
 
   @@index([importId, rowIndex])
   @@index([dedupeKey])

@@ -11,9 +11,13 @@ import {
   PlanDocMime,
   PPTX_MIME,
 } from './document-text';
+import { normalizeTime, toActionType } from '../planning/plan-rules';
 
 export interface PlanRow {
-  date: string;
+  /** ISO YYYY-MM-DD, or null when the document does not let us decide. A human must then fix it. */
+  date: string | null;
+  /** The date exactly as written in the document ("Chaque vendredi", "Semaine 2"...). */
+  dateText: string | null;
   phase: string;
   label: string;
   content: string;
@@ -23,11 +27,22 @@ export interface PlanRow {
   format: string;
   timeOfDay: string | null;
   caption: string | null;
+  /** POST, COMMENT, ENGAGEMENT, SPONSORING, PREPARATION, REPORTING or OTHER. */
+  actionType: string;
+  /** Where it was found: "Page 2", "Slide 4", "Tableau 1"... */
+  sourceRef: string | null;
+  /** The original wording, copied from the document. */
+  sourceText: string | null;
+  /** 0..1, the model's own confidence that the row matches the document. */
+  confidence: number | null;
 }
 
 export interface PlanExtractContext {
   /** YYYY-MM-DD. Used to resolve dates written without a year. */
   releaseDate?: string;
+  /** YYYY-MM-DD bounds of the campaign. Used ONLY to expand recurring items ("every Friday"). */
+  windowStart?: string;
+  windowEnd?: string;
 }
 
 export interface PlanExtractResult {
@@ -213,7 +228,7 @@ export class GeminiService {
     }
 
     const year = Number(ctx.releaseDate?.slice(0, 4)) || new Date().getFullYear();
-    const prompt = this.planPrompt(year, ctx.releaseDate);
+    const prompt = this.planPrompt(year, ctx);
 
     let parts: Array<string | Part>;
     let textTags: string[] = [];
@@ -235,23 +250,39 @@ export class GeminiService {
     return { rows, warnings, documentHashtags };
   }
 
-  private planPrompt(year: number, releaseDate?: string): string {
+  private planPrompt(year: number, ctx: PlanExtractContext): string {
+    const { releaseDate, windowStart, windowEnd } = ctx;
     return `You are extracting a social media campaign plan from the document provided (French, Arabic or English; it may be scanned, so read it visually if needed).
 Campaign year: ${year}.${releaseDate ? ` The film is released on ${releaseDate}.` : ''} Dates written without a year (for example "3 OCTOBRE") belong to ${year} unless the document says otherwise.
+${windowStart && windowEnd ? `Campaign window: ${windowStart} to ${windowEnd}. Use it ONLY to expand explicitly recurring items (for example "every Friday", "each week"): produce one row per occurrence inside the window. Never use it to invent actions.` : ''}
+
+The plan may be daily, weekly or monthly, and it contains more than posts. Extract EVERY planned action, one row per action.
 
 Return ONLY valid JSON in this shape:
-{"rows":[{"date":"YYYY-MM-DD","phase":"","label":"","content":"","execution":"","objective":"","platforms":["INSTAGRAM"],"format":"REEL","timeOfDay":"18:00","caption":null}],"documentHashtags":["tag"]}
+{"rows":[{"date":"YYYY-MM-DD","dateText":"Lundi 19 octobre","actionType":"POST","phase":"","label":"","content":"","execution":"","objective":"","platforms":["INSTAGRAM"],"format":"REEL","timeOfDay":"18:00","caption":null,"sourceRef":"Page 2","sourceText":"10h - Poster l'affiche sur Facebook et Instagram","confidence":0.9}],"documentHashtags":["tag"]}
 
 Rules:
-- One row per planned post (or planned day). Several rows may share a date.
-- platforms: only FACEBOOK, INSTAGRAM, TIKTOK (map "IG"/"Insta" to INSTAGRAM, "FB" to FACEBOOK).
-- format: only IMAGE, VIDEO, REEL, STORY, TEXT.
-- date: ISO YYYY-MM-DD. If a row's date cannot be determined, omit that row. Never guess dates.
-- timeOfDay: HH:MM (24h) or null.
-- caption: only if the document gives suggested caption text, copied as written; otherwise null.
+- actionType, exactly one of:
+  POST = a publication (poster, photo, reel, video, story, carousel, text post);
+  COMMENT = writing or pinning a comment on a post;
+  ENGAGEMENT = replying to the audience, answering comments or messages, community management;
+  SPONSORING = boosting a post or running an ad;
+  PREPARATION = producing material (design a poster, shoot or edit a video);
+  REPORTING = reviewing results, statistics, a report;
+  OTHER = anything else.
+  NEVER turn a non-publication into a POST. "Répondre aux commentaires" is ENGAGEMENT, not a post.
+- platforms: only FACEBOOK, INSTAGRAM, TIKTOK (map "IG"/"Insta" to INSTAGRAM, "FB" to FACEBOOK). Use [] when none is named. Never assume a platform.
+- format (POST only): IMAGE, VIDEO, REEL, STORY, TEXT. For other action types use "REEL".
+- date: ISO YYYY-MM-DD. If the date cannot be determined without guessing, set date to null and copy the wording into dateText. Keep the row. Never invent a date.
+- dateText: the date or day wording exactly as written in the document, or null.
+- timeOfDay: HH:MM (24h), or null when the document gives no time.
+- caption: the exact caption (POST) or comment text (COMMENT) if the document supplies it, copied character for character in its original language. Never rewrite, translate or improve it. Otherwise null.
+- sourceRef: where the row is in the document ("Page 2", "Slide 4", "Tableau 1 ligne 3", "Paragraphe 5").
+- sourceText: the original sentence or table cell this row comes from, copied as written.
+- confidence: 0 to 1, how sure you are that the row matches the document.
+- label: a short title. content / execution / objective: the document's own words, kept in its language.
 - documentHashtags: every hashtag literally written in the document, without the #.
-- Keep text fields in the document's own language. Never invent rows, details, venues or times.
-- Return ONLY the JSON, no explanation.`;
+- Never invent rows, details, venues or times. Return ONLY the JSON, no explanation.`;
   }
 
   private normalizeRows(raw: any[]): { rows: PlanRow[]; warnings: string[] } {
@@ -261,43 +292,51 @@ Rules:
 
     raw.slice(0, MAX_ROWS).forEach((r, i) => {
       const n = i + 1;
-      const date = str(r?.date, 10);
-      if (!isRealDate(date)) {
-        warnings.push(`Ligne ${n} ignorée : date invalide ou absente.`);
-        return;
-      }
+      const rawDate = str(r?.date, 10);
+      const date = isRealDate(rawDate) ? rawDate : null;
+      const dateText = str(r?.dateText, 120) || null;
+      // A row with no usable date is KEPT so a human can fix it against the document.
+      if (!date) warnings.push(`Ligne ${n} : date introuvable${dateText ? ` (« ${dateText} »)` : ''}, à corriger.`);
+
+      const actionType = toActionType(r?.actionType);
       const platforms = [
         ...new Set(
-          (Array.isArray(r.platforms) ? r.platforms : [])
+          (Array.isArray(r?.platforms) ? r.platforms : [])
             .map((p: unknown) => String(p).toUpperCase())
             .filter((p: string) => PLATFORMS.includes(p)),
         ),
       ] as string[];
-      if (platforms.length === 0) warnings.push(`Ligne ${n} (${date}) : aucune plateforme reconnue.`);
 
-      const fmt = str(r.format, 10).toUpperCase();
+      const fmt = str(r?.format, 10).toUpperCase();
       const format = FORMATS.includes(fmt) ? fmt : 'REEL';
-      if (!FORMATS.includes(fmt)) warnings.push(`Ligne ${n} (${date}) : format non reconnu, REEL utilisé par défaut.`);
+      if (actionType === 'POST' && !FORMATS.includes(fmt)) {
+        warnings.push(`Ligne ${n} : format non reconnu, REEL utilisé par défaut.`);
+      }
 
-      const time = str(r.timeOfDay, 5);
-      const timeOfDay = /^([01]\d|2[0-3]):[0-5]\d$/.test(time) ? time : null;
-      const label = str(r.label, 200) || `Publication du ${date}`;
+      const timeOfDay = normalizeTime(str(r?.timeOfDay, 8));
+      const label = str(r?.label, 200) || (date ? `Action du ${date}` : `Action ${n}`);
+      const conf = typeof r?.confidence === 'number' && r.confidence >= 0 && r.confidence <= 1 ? r.confidence : null;
 
-      const key = `${date}|${timeOfDay}|${label}|${[...platforms].sort().join(',')}`;
+      const key = `${actionType}|${date ?? dateText}|${timeOfDay}|${label}|${[...platforms].sort().join(',')}`;
       if (seen.has(key)) return;
       seen.add(key);
 
       rows.push({
         date,
-        phase: str(r.phase, 100),
+        dateText,
+        phase: str(r?.phase, 100),
         label,
-        content: str(r.content, 2000),
-        execution: str(r.execution, 2000),
-        objective: str(r.objective, 1000),
+        content: str(r?.content, 2000),
+        execution: str(r?.execution, 2000),
+        objective: str(r?.objective, 1000),
         platforms,
         format,
         timeOfDay,
-        caption: str(r.caption, 2200) || null,
+        caption: str(r?.caption, 2200) || null,
+        actionType,
+        sourceRef: str(r?.sourceRef, 120) || null,
+        sourceText: str(r?.sourceText, 1000) || null,
+        confidence: conf,
       });
     });
 

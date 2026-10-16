@@ -114,6 +114,9 @@ export interface ContentItem {
   approvedBy: { id: string; name: string } | null;
 }
 
+export type PlanActionType = 'POST' | 'COMMENT' | 'ENGAGEMENT' | 'SPONSORING' | 'PREPARATION' | 'REPORTING' | 'OTHER';
+export type PlanProgress = 'PENDING' | 'DONE' | 'SKIPPED' | 'BLOCKED';
+
 export interface PlanEntry {
   id: string;
   campaignId: string;
@@ -127,6 +130,14 @@ export interface PlanEntry {
   platforms: Platform[];
   format: PostFormat;
   createdAt: string;
+  actionType: PlanActionType;
+  text: string | null;
+  sourceRef: string | null;
+  sourceText: string | null;
+  progress: PlanProgress;
+  progressNote: string | null;
+  progressAt: string | null;
+  contentItems?: Array<{ id: string; approvalStatus: string }>;
 }
 
 export interface CampaignDay {
@@ -175,7 +186,7 @@ export type PlanImportStatus = 'PREVIEW' | 'COMMITTED' | 'FAILED';
 export interface PlanImportRow {
   id: string;
   rowIndex: number;
-  date: string;
+  date: string | null;
   phase: string;
   label: string;
   content: string;
@@ -190,6 +201,14 @@ export interface PlanImportRow {
   assetRef: string | null;
   error: string | null;
   warning: string | null;
+  actionType: PlanActionType;
+  sourceRef: string | null;
+  sourceText: string | null;
+  dateText: string | null;
+  confidence: number | null;
+  verified: boolean;
+  edited: boolean;
+  original: Record<string, unknown> | null;
 }
 
 export interface PlanImport {
@@ -200,6 +219,8 @@ export interface PlanImport {
   errorCount: number;
   warningCount: number;
   createdAt: string;
+  source?: string;
+  hasSource?: boolean;
   rows?: PlanImportRow[];
   _count?: { rows: number };
 }
