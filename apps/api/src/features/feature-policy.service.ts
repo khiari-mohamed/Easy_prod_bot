@@ -273,12 +273,21 @@ export class FeaturePolicyService implements OnModuleInit {
     return this.overview();
   }
 
-  history(featureKey: string | undefined, take = 100) {
-    return this.prisma.featureConfigAudit.findMany({
+    async history(featureKey: string | undefined, take = 100) {
+    const rows = await this.prisma.featureConfigAudit.findMany({
       where: featureKey ? { featureKey } : undefined,
       orderBy: { createdAt: 'desc' },
       take: Math.min(Math.max(take, 1), 500),
     });
+    const users = await this.prisma.user.findMany({
+      where: { id: { in: [...new Set(rows.map((r) => r.changedById))] } },
+      select: { id: true, name: true },
+    });
+    const nameOf = new Map(users.map((u) => [u.id, u.name]));
+    return rows.map((r) => ({
+      ...r,
+      changedByName: nameOf.get(r.changedById) ?? (r.changedById === 'system' ? 'Système' : null),
+    }));
   }
 
   // ---------------------------------------------------------------- emergency stop

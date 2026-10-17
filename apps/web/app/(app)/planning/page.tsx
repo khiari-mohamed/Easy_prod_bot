@@ -1,5 +1,6 @@
 'use client';
 
+import Link from 'next/link';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { api, useFetch } from '@/lib/api';
 import type { Me, Platform, PlanActionType, PlanImport, PlanImportRow, PostFormat } from '@/lib/types';
@@ -260,7 +261,7 @@ function ImportCard({
   const [picked, setPicked] = useState<string[]>([]);
   const [filter, setFilter] = useState<Filter>('all');
   const [page, setPage] = useState(1);
-
+  const [done, setDone] = useState<{ message: string; drafts: number } | null>(null);
   const data = detail.data;
   const meta = data?.meta;
   const docTags = meta?.documentHashtags ?? [];
@@ -300,10 +301,12 @@ function ImportCard({
         method: 'POST',
         body: { addHashtags: picked },
       });
-      alert(
-        `✅ ${r.created} entrée(s) ajoutée(s) au calendrier dont ${r.tasks} tâche(s) (${r.skipped} déjà existante(s) ignorée(s)).` +
-          (r.drafts ? ` ${r.drafts} brouillon(s) de contenu avec légende.` : ''),
-      );
+        setDone({
+        message:
+          `✅ ${r.created} entrée(s) ajoutée(s) au calendrier dont ${r.tasks} tâche(s) (${r.skipped} déjà existante(s) ignorée(s)).` +
+          (r.drafts ? ` ${r.drafts} brouillon(s) de contenu créé(s).` : ''),
+        drafts: r.drafts,
+      });
       refresh();
     });
 
@@ -339,7 +342,17 @@ function ImportCard({
           {isApprover && <button className="btn text-xs text-red-600" disabled={busy} onClick={remove}>Supprimer</button>}
         </div>
       </div>
-      <ErrorNote message={error ?? detail.error} />
+            <ErrorNote message={error ?? detail.error} />
+      {done && (
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-md bg-emerald-50 p-2 text-xs text-emerald-900">
+          <span>{done.message}</span>
+          {done.drafts > 0 && (
+            <Link href="/content" className="btn btn-primary text-xs">
+              Ouvrir les brouillons dans Caption Studio
+            </Link>
+          )}
+        </div>
+      )}
 
       {open && (
         <div className="mt-2 space-y-3">

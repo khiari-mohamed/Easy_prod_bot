@@ -24,6 +24,9 @@ import { SettingsModule } from './settings/settings.module';
 import { FeaturesModule } from './features/features.controller';
 import { UsersModule } from './users/users.module';
 import { TikTokModule } from './tiktok/tiktok.module';
+import { CaptionsModule } from './captions/captions.module';
+import { HashtagsModule } from './hashtags/hashtags.module';
+import { TrendsModule } from './trends/trends.module';
 
 @Module({
   imports: [
@@ -50,6 +53,10 @@ import { TikTokModule } from './tiktok/tiktok.module';
     AnalyticsModule,
     CommentsModule,
     TikTokModule,
+    ContentModule,
+    HashtagsModule,
+    TrendsModule,
+    CaptionsModule,
   ],
   controllers: [HealthController],
   providers: [{ provide: APP_GUARD, useClass: ThrottlerGuard }],

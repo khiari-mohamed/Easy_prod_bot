@@ -4,10 +4,11 @@ import Link from 'next/link';
 import { usePathname, useRouter } from 'next/navigation';
 import { useState } from 'react';
 import { api, useFetch } from '@/lib/api';
-import type { Campaign, Me, PauseState } from '@/lib/types';
+import { EP } from '@/lib/endpoints';
+import type { Campaign, EffectiveMap, Me, PauseState } from '@/lib/types';
 import { Loading } from './ui';
 
-type IconName = 'home' | 'calendar' | 'plan' | 'content' | 'send' | 'chart' | 'media' | 'plug' | 'team' | 'comments';
+type IconName = 'home' | 'calendar' | 'plan' | 'content' | 'send' | 'chart' | 'media' | 'plug' | 'team' | 'comments' | 'admin';
 
 const ICONS: Record<IconName, string> = {
   home: 'M3 11l9-8 9 8M5 10v10h5v-6h4v6h5V10',
@@ -20,7 +21,9 @@ const ICONS: Record<IconName, string> = {
   plug: 'M9 3v5M15 3v5M7 8h10v4a5 5 0 01-10 0zM12 17v4',
   team: 'M9 11a3 3 0 100-6 3 3 0 000 6zM3 20c0-3.3 2.7-6 6-6s6 2.7 6 6M17 11a2.5 2.5 0 100-5M21 19c0-2.4-1.6-4.4-4-5',
   comments: 'M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z',
+  admin: 'M12 3l8 3v6c0 4.5-3.2 8-8 9-4.8-1-8-4.5-8-9V6zM9 12l2 2 4-4',
 };
+
 
 function Icon({ name, className = 'h-[18px] w-[18px]' }: { name: IconName; className?: string }) {
   return (
@@ -41,6 +44,7 @@ const NAV: Array<{ href: string; label: string; icon: IconName; admin?: boolean 
   { href: '/assets', label: 'Médias', icon: 'media' },
   { href: '/accounts', label: 'Comptes', icon: 'plug' },
   { href: '/team', label: 'Équipe', icon: 'team', admin: true },
+  { href: '/administration', label: 'Administration', icon: 'admin', admin: true },
 ];
 
 const dayKey = (d: Date) => new Intl.DateTimeFormat('sv-SE', { timeZone: 'Africa/Tunis' }).format(d);
@@ -65,6 +69,8 @@ export function Shell({ children }: { children: React.ReactNode }) {
   const me = useFetch<Me>('/auth/me');
   const pause = useFetch<PauseState>('/settings/pause');
   const campaign = useFetch<Campaign>('/campaign');
+  const effective = useFetch<EffectiveMap>(EP.features.effective);
+  const emergencyActive = Object.values(effective.data ?? {}).some((e) => e.restrictions.some((r) => r.by === 'EMERGENCY_STOP'));
   const [busy, setBusy] = useState(false);
 
   if (me.loading) return <div className="p-8"><Loading /></div>;
@@ -165,6 +171,19 @@ export function Shell({ children }: { children: React.ReactNode }) {
               <button className="rounded-md bg-white px-3 py-1 text-red-700 hover:bg-red-50" disabled={busy} onClick={togglePause}>
                 Reprendre
               </button>
+            )}
+          </div>
+        )}
+
+        {emergencyActive && (
+          <div className="flex flex-wrap items-center justify-between gap-2 bg-red-700 px-4 py-2.5 text-sm font-semibold text-white">
+            <span>
+              Arrêt d&apos;urgence de l&apos;automatisation actif. Aucune nouvelle action externe automatique ne sera lancée.
+            </span>
+            {role === 'ADMIN' && (
+              <Link href="/administration" className="rounded-md bg-white px-3 py-1 text-red-700 hover:bg-red-50">
+                Ouvrir l&apos;administration
+              </Link>
             )}
           </div>
         )}

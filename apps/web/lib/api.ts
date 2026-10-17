@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState } from 'react';
 
 export class ApiError extends Error {
-  constructor(message: string, readonly status: number) {
+  constructor(message: string, readonly status: number, readonly body: Record<string, unknown> = {}) {
     super(message);
   }
 }
@@ -15,7 +15,7 @@ async function handle<T>(res: Response): Promise<T> {
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
     const msg = Array.isArray(body.message) ? body.message.join(' • ') : body.message;
-    throw new ApiError(msg ?? res.statusText, res.status);
+    throw new ApiError(msg ?? res.statusText, res.status, body);
   }
   return res.status === 204 ? (undefined as T) : res.json();
 }

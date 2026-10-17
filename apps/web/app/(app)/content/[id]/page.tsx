@@ -4,8 +4,9 @@ import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
 import { useEffect, useState } from 'react';
 import { api, useFetch } from '@/lib/api';
-import { toInputValue, fromInputValue } from '@/lib/format';
+import { fromInputValue } from '@/lib/format';
 import type { Asset, CaptionLanguage, ContentItem, Me, Platform, PostFormat, PublishMode } from '@/lib/types';
+import { CaptionStudio } from '@/components/CaptionStudio';
 import { ErrorNote, Loading, PageTitle, PlatformTag, StatusBadge } from '@/components/ui';
 
 const PLATFORMS: Platform[] = ['FACEBOOK', 'INSTAGRAM'];
@@ -100,42 +101,6 @@ export default function ContentItemPage() {
     );
   }
 
-  async function autofill() {
-    if (!title.trim() && !caption.trim()) {
-      setError('Ajoutez au moins un titre ou une légende de départ.');
-      return;
-    }
-    setBusy(true);
-    setError(null);
-    try {
-      const r = await api<{
-        source: string;
-        variants: { caption: string; hashtags: string[]; warnings?: string[] }[];
-        fallbackReason?: string;
-      }>('/ai/captions', {
-        method: 'POST',
-        body: {
-          platform: genPlatforms[0] ?? 'INSTAGRAM',
-          format: genFormat,
-          language,
-          brief: title.trim() ? `Sujet de la publication : ${title.trim()}` : undefined,
-          contentItemId: isNew ? undefined : params.id,
-          variants: 1,
-        },
-      });
-      const v = r.variants[0];
-      if (!v) throw new Error('Aucune proposition reçue.');
-      setCaption(v.caption);
-      setHashtags(v.hashtags.join(' '));
-      if (r.source !== 'gemini') setError(`Gemini indisponible (${r.fallbackReason ?? 'erreur inconnue'}) : texte de secours.`);
-      else if (v.warnings?.length) setError(v.warnings.join(' '));
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  }
-
   function toggleAsset(id: string) {
     setSelectedAssets((prev) => prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]);
   }
@@ -189,11 +154,6 @@ export default function ContentItemPage() {
         </div>
 
         <div>
-          {editable && (
-            <button type="button" className="btn text-xs" disabled={busy} onClick={autofill}>
-              ✨ Remplir la légende et les hashtags avec l&apos;IA
-            </button>
-          )}
           <label className="label">Légende de base ({caption.length})</label>
           <textarea
             className="input min-h-36 font-[inherit]"
@@ -201,35 +161,19 @@ export default function ContentItemPage() {
             value={caption}
             onChange={(e) => setCaption(e.target.value)}
             disabled={!editable}
-            placeholder="Rédigez en Darija, Français, ou les deux…"
+            placeholder="Rédigez en Darija, Français, ou les deux… ou utilisez Caption Studio ci-dessous."
           />
         </div>
 
         <div>
           <label className="label">Hashtags (sans #, séparés par un espace)</label>
-          <div className="flex gap-2">
-            <input className="input flex-1" dir="auto" value={hashtags} onChange={(e) => setHashtags(e.target.value)} disabled={!editable} />
-            {editable && (
-              <button className="btn text-xs" disabled={busy} onClick={async () => {
-                if (!caption.trim()) return;
-                setBusy(true);
-                try {
-                  const r = await api<{ hashtags: string[] }>('/ai/hashtags', {
-                    method: 'POST',
-                    body: { caption, platform: genPlatforms[0], language },
-                  });
-                  setHashtags(r.hashtags.join(' '));
-                } catch (e) { setError((e as Error).message); }
-                finally { setBusy(false); }
-              }}>🏷 Suggérer</button>
-            )}
-          </div>
+          <input className="input" dir="auto" value={hashtags} onChange={(e) => setHashtags(e.target.value)} disabled={!editable} />
         </div>
 
         <div>
           <label className="label">Médias ({selectedAssets.length} sélectionné{selectedAssets.length !== 1 ? 's' : ''})</label>
           {allAssets.length === 0 ? (
-            <p className="text-xs text-neutral-500">Aucun média. <Link href="/assets" className="underline">Ajoutez-en d'abord.</Link></p>
+            <p className="text-xs text-neutral-500">Aucun média. <Link href="/assets" className="underline">Ajoutez-en d&apos;abord.</Link></p>
           ) : (
             <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
               {allAssets.map((a) => {
@@ -263,8 +207,25 @@ export default function ContentItemPage() {
         )}
       </div>
 
+      {isNew && (
+        <p className="rounded-md bg-neutral-50 px-3 py-2 text-xs text-neutral-600">
+          Enregistrez d&apos;abord ce contenu : Caption Studio utilise son contexte (campagne, plan, médias) pour proposer des légendes et des hashtags.
+        </p>
+      )}
+
       {!isNew && d && (
         <>
+          <CaptionStudio
+            contentItemId={d.id}
+            planEntryId={d.planEntryId}
+            campaignId={d.campaignId}
+            defaultLanguage={d.captionLanguage ?? 'DARIJA_FRENCH'}
+            canApprove={isApprover}
+            canApply={editable}
+            posts={d.posts.map((p) => ({ id: p.id, platform: p.platform, status: p.status }))}
+            onApplied={() => item.reload()}
+          />
+
           <div className="card space-y-3">
             <h2 className="font-bold">Workflow</h2>
             <div className="flex flex-wrap gap-2">
@@ -287,7 +248,7 @@ export default function ContentItemPage() {
                 </>
               )}
               {d.approvalStatus === 'PENDING' && !isApprover && (
-                <span className="text-sm text-neutral-600">En attente d'un validateur.</span>
+                <span className="text-sm text-neutral-600">En attente d&apos;un validateur.</span>
               )}
             </div>
           </div>

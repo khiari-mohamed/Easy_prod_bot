@@ -209,6 +209,15 @@ export class GeminiService {
     throw new Error(`Gemini request failed: ${(lastErr as Error)?.message ?? 'unknown error'}`);
   }
 
+  /**
+   * Public JSON generation used by the Caption Studio. Timeout and transient-error retries
+   * come from generate(); the caller validates the shape and may retry once with a correction.
+   */
+  async generateJson(prompt: string, temperature = 0.7): Promise<{ json: unknown; model: string }> {
+    const text = await this.generate([prompt], temperature);
+    return { json: parseJson(text), model: getEnv().GEMINI_MODEL };
+  }
+
   // ---------------------------------------------------------------- plan import
 
   /** Backwards-compatible wrapper: rows only. Prefer extractPlanDetailed. */

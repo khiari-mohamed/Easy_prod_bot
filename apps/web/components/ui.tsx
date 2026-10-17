@@ -1,6 +1,6 @@
 'use client';
 
-import type { PostStatus } from '@/lib/types';
+import type { FeatureMode, PostStatus } from '@/lib/types';
 
 type Tone = { chip: string; dot: string; label: string };
 
@@ -126,5 +126,105 @@ export function Toggle({
     >
       <span className={`inline-block h-4 w-4 rounded-full bg-white shadow transition-transform ${checked ? 'translate-x-6' : 'translate-x-1'}`} />
     </button>
+  );
+}
+
+const MODE_LABEL: Record<FeatureMode, string> = { OFF: 'Désactivé', REVIEW: 'Validation', AUTO: 'Automatique' };
+const MODE_TONE: Record<FeatureMode, string> = {
+  OFF: 'bg-neutral-100 text-neutral-600',
+  REVIEW: 'bg-amber-50 text-amber-800',
+  AUTO: 'bg-emerald-50 text-emerald-800',
+};
+
+export const modeLabel = (m: FeatureMode) => MODE_LABEL[m] ?? m;
+
+export function ModeBadge({ mode }: { mode: FeatureMode }) {
+  return <span className={`rounded-full px-2 py-0.5 text-xs font-semibold ${MODE_TONE[mode] ?? MODE_TONE.OFF}`}>{MODE_LABEL[mode] ?? mode}</span>;
+}
+
+/** Segmented OFF / REVIEW / AUTO control. Only the modes in `options` are offered. */
+export function ModeSwitch({
+  value,
+  options,
+  onChange,
+  disabled,
+  label,
+}: {
+  value: FeatureMode;
+  options: FeatureMode[];
+  onChange: (m: FeatureMode) => void;
+  disabled?: boolean;
+  label: string;
+}) {
+  return (
+    <div role="radiogroup" aria-label={label} className="inline-flex overflow-hidden rounded-lg border border-line bg-white text-xs font-semibold">
+      {options.map((m) => {
+        const active = m === value;
+        const on = m === 'OFF' ? 'bg-neutral-700 text-white' : m === 'REVIEW' ? 'bg-amber-500 text-white' : 'bg-emerald-500 text-white';
+        return (
+          <button
+            key={m}
+            type="button"
+            role="radio"
+            aria-checked={active}
+            disabled={disabled}
+            onClick={() => onChange(m)}
+            className={`px-3 py-1.5 transition-colors disabled:opacity-50 ${active ? on : 'text-neutral-600 hover:bg-neutral-50'}`}
+          >
+            {MODE_LABEL[m]}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+const MODE_LABEL: Record<FeatureMode, string> = { OFF: 'Désactivé', REVIEW: 'Validation', AUTO: 'Automatique' };
+const MODE_TONE: Record<FeatureMode, string> = {
+  OFF: 'bg-neutral-100 text-neutral-600',
+  REVIEW: 'bg-amber-50 text-amber-800',
+  AUTO: 'bg-emerald-50 text-emerald-800',
+};
+
+export const modeLabel = (m: FeatureMode) => MODE_LABEL[m] ?? m;
+
+export function ModeBadge({ mode }: { mode: FeatureMode }) {
+  return <span className={`rounded-full px-2 py-0.5 text-xs font-semibold ${MODE_TONE[mode] ?? MODE_TONE.OFF}`}>{MODE_LABEL[mode] ?? mode}</span>;
+}
+
+/** Segmented OFF / REVIEW / AUTO control. Only the modes in `options` are offered. */
+export function ModeSwitch({
+  value,
+  options,
+  onChange,
+  disabled,
+  label,
+}: {
+  value: FeatureMode;
+  options: FeatureMode[];
+  onChange: (m: FeatureMode) => void;
+  disabled?: boolean;
+  label: string;
+}) {
+  return (
+    <div role="radiogroup" aria-label={label} className="inline-flex overflow-hidden rounded-lg border border-line bg-white text-xs font-semibold">
+      {options.map((m) => {
+        const active = m === value;
+        const on = m === 'OFF' ? 'bg-neutral-700 text-white' : m === 'REVIEW' ? 'bg-amber-500 text-white' : 'bg-emerald-500 text-white';
+        return (
+          <button
+            key={m}
+            type="button"
+            role="radio"
+            aria-checked={active}
+            disabled={disabled}
+            onClick={() => onChange(m)}
+            className={`px-3 py-1.5 transition-colors disabled:opacity-50 ${active ? on : 'text-neutral-600 hover:bg-neutral-50'}`}
+          >
+            {MODE_LABEL[m]}
+          </button>
+        );
+      })}
+    </div>
   );
 }

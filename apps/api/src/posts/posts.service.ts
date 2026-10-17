@@ -191,6 +191,9 @@ export class PostsService {
         captionLanguage: dto.captionLanguage,
         scheduledAt: nextScheduled,
         publishMode: dto.publishMode,
+        // A human changed the text after it was applied from an AI suggestion: the post's own
+        // approval flow now covers it, so the link to the suggestion is dropped.
+        aiCaptionSuggestionId: changedFields.includes('caption') || changedFields.includes('hashtags') ? null : undefined,
         ...withState('DRAFT', {
           approvedById: null,
           approvedAt: null,
@@ -215,6 +218,7 @@ export class PostsService {
     const post = await this.get(id);
     const problems = validateForSubmit(post, post.asset);
     if (problems.length) throw new BadRequestException(problems);
+    await this.assertAiCaptionReviewed(post);
     this.assertAssetUsable(post.asset, post.platform, post.format);
     await this.transition(id, ['DRAFT'], { status: 'PENDING_APPROVAL', statusNote: null });
     await this.audit.log(user.id, 'post.submit', 'Post', id);
@@ -226,6 +230,7 @@ export class PostsService {
     if (!post.scheduledAt) throw new BadRequestException('Set a publication date and time before approving');
     const problems = validateForSubmit(post, post.asset);
     if (problems.length) throw new BadRequestException(problems);
+    await this.assertAiCaptionReviewed(post);
     this.assertAssetUsable(post.asset, post.platform, post.format);
 
     let statusNote: string | null = null;
@@ -525,6 +530,31 @@ export class PostsService {
     } catch (err) {
       this.logger.warn(`Could not remove queued job for post ${id}: ${(err as Error).message}`);
     }
+  }
+
+  /**
+   * Publish stays blocked for AI text that no human approved: when the caption came from a
+   * Caption Studio suggestion, that suggestion must still be APPROVED at the revision that
+   * was approved, and the post must carry exactly the approved caption and hashtags.
+   */
+  private async assertAiCaptionReviewed(post: LoadedPost) {
+    if (!post.aiCaptionSuggestionId) return;
+    const s = await this.prisma.captionSuggestion.findUnique({
+      where: { id: post.aiCaptionSuggestionId },
+      select: { status: true, revision: true, approvedRevision: true, finalText: true, metadata: true },
+    });
+    const fail = (why: string) => {
+      throw new BadRequestException(`AI caption not validated: ${why}. Approve it in Caption Studio or edit the post caption yourself.`);
+    };
+    if (!s) return fail('the linked suggestion no longer exists');
+    if (s.status !== 'APPROVED' || s.approvedRevision !== s.revision || !s.finalText) {
+      return fail('the suggestion is not approved (or was edited after approval)');
+    }
+    const flat = (t: string) => t.replace(/\s+/g, ' ').trim();
+    if (flat(s.finalText) !== flat(post.caption)) return fail('the post caption differs from the approved text');
+    const approved = ((s.metadata as Record<string, unknown> | null)?.approvedHashtags as string[] | undefined) ?? [];
+    const tags = (a: string[]) => [...new Set(a.map((h) => h.replace(/^#/, '').toLowerCase()))].sort().join(',');
+    if (tags(approved) !== tags(post.hashtags)) return fail('the post hashtags differ from the approved hashtags');
   }
 
   private async requireContentItem(id: string) {

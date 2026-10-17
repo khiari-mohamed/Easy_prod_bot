@@ -472,10 +472,16 @@ model Post {
   publishNowAuthorizedAt DateTime?
   publishNowAuthorizedById String?
 
+  // AI Caption Studio: set when the caption/hashtags were applied from an AI suggestion.
+  // submit/approve refuse the post unless that suggestion is still approved at the applied revision.
+  aiCaptionSuggestionId String?
+  aiCaptionSuggestion   CaptionSuggestion? @relation("PostAiCaption", fields: [aiCaptionSuggestionId], references: [id], onDelete: SetNull)
+
   @@index([status, scheduledAt])
   @@index([platform, publishedAt])
   @@index([approvalStatus, publishState, scheduledAt])
   @@index([contentItemId])
+  @@index([aiCaptionSuggestionId])
 }
 
 model PlanImport {
@@ -747,24 +753,34 @@ model CaptionSuggestion {
   contentItem   ContentItem?     @relation(fields: [contentItemId], references: [id], onDelete: SetNull)
   platform      Platform
   language      CaptionLanguage
-  text          String           // generated text
-  editedText    String?          // text after human edits (if any)
-  finalText     String?          // the text that actually went to the post
-  tone          String?          // energetic | emotional | concise | ...
+  text          String           // generated text (never mutated)
+  editedText    String?          // text after human edits
+  finalText     String?          // the approved text (set on approval, cleared on edit)
+  tone          String?
   status        SuggestionStatus @default(GENERATED)
-  model         String           // e.g. "gemini-2.0-flash"
+  model         String
   promptVersion String           @default("v1")
-  warnings      String[]         // lint warnings from the generator
-  metadata      Json?            // extra context snapshot (page stats, etc.)
+  warnings      String[]
+  metadata      Json?
   createdAt     DateTime         @default(now())
   updatedAt     DateTime         @updatedAt
+
+  // Review workflow
+  batchId          String?
+  revision         Int       @default(1)   // +1 on every edit: approval is bound to a revision
+  approvedById     String?
+  approvedAt       DateTime?
+  approvedRevision Int?
+  appliedAt        DateTime?
 
   reviews            CaptionReview[]
   hashtagSuggestions HashtagSuggestion[]
   feedbacks          GenerationFeedback[]
+  appliedPosts       Post[]               @relation("PostAiCaption")
 
   @@index([contentItemId, platform, status])
   @@index([status, createdAt])
+  @@index([batchId])
 }
 
 /// Human decision on a caption suggestion.
@@ -784,14 +800,17 @@ model CaptionReview {
 
 /// Central hashtag library — one row per unique normalised tag.
 model Hashtag {
-  id            String        @id @default(cuid())
-  normalizedTag String        @unique // lowercase, no #, unicode letters only
-  displayTag    String        // original casing as first seen
+  id            String           @id @default(cuid())
+  normalizedTag String           @unique
+  displayTag    String
   language      CaptionLanguage?
-  category      String?       // film | comedy | drama | tunis | etc.
-  origin        HashtagOrigin @default(MANUAL)
+  category      String?
+  origin        HashtagOrigin    @default(MANUAL)
   notes         String?
-  createdAt     DateTime      @default(now())
+  createdAt     DateTime         @default(now())
+  blocked       Boolean          @default(false)
+  blockedReason String?
+  createdById   String?
 
   suggestions   HashtagSuggestion[]
   usages        HashtagUsage[]
@@ -834,40 +853,46 @@ model HashtagPerformance {
   hashtagId   String
   hashtag     Hashtag  @relation(fields: [hashtagId], references: [id], onDelete: Cascade)
   platform    Platform
-  postId      String?  // nullable: account-level measurements have no single post
-  impressions Int?
+  postId      String?
+  impressions Int?     // null = the platform did not return it (NOT zero)
   reach       Int?
   engagements Int?
   measuredAt  DateTime @default(now())
 
+  @@unique([hashtagId, platform, postId])
   @@index([hashtagId, platform, measuredAt])
 }
 
 /// Verified external trend observation. Expires automatically.
 model TrendSignal {
-  id          String   @id @default(cuid())
-  platform    Platform
-  hashtagId   String?
-  hashtag     Hashtag? @relation(fields: [hashtagId], references: [id], onDelete: SetNull)
-  rawTag      String   // original tag string (before normalisation)
-  source      String   // "meta_insights" | "manual" | "tiktok_creative_center"
-  region      String   @default("TN") // ISO 3166-1 alpha-2
-  score       Float    @default(0)    // normalised 0..1
-  observedAt  DateTime @default(now())
-  expiresAt   DateTime // stale signals are filtered out automatically
+  id            String   @id @default(cuid())
+  platform      Platform
+  hashtagId     String?
+  hashtag       Hashtag? @relation(fields: [hashtagId], references: [id], onDelete: SetNull)
+  rawTag        String
+  normalizedTag String   @default("")
+  source        String   // manual | tiktok_creative_center | instagram_manual | facebook_insights | meta_insights
+  sourceNote    String?  // evidence: URL or a sentence saying where it was observed
+  region        String   @default("TN")
+  score         Float    @default(0)
+  observedAt    DateTime @default(now())
+  expiresAt     DateTime
+  createdById   String?
 
+  @@unique([platform, normalizedTag, source, region])
   @@index([platform, expiresAt])
   @@index([hashtagId, platform])
 }
 
 /// Human rating of a generated suggestion (1-5 stars + optional note).
 model GenerationFeedback {
-  id           String           @id @default(cuid())
+  id           String            @id @default(cuid())
   suggestionId String
   suggestion   CaptionSuggestion @relation(fields: [suggestionId], references: [id], onDelete: Cascade)
-  rating       Int              // 1..5
+  userId       String?
+  rating       Int
   reason       String?
-  createdAt    DateTime         @default(now())
+  createdAt    DateTime          @default(now())
 }
 
 // Add back-relations on existing models (additive)
