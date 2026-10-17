@@ -21,6 +21,7 @@ import { PublishingControlModule } from './publishing/publishing-control.module'
 import { QueueModule } from './queue/queue.module';
 import { CommentsModule } from './comments/comments.module';
 import { SettingsModule } from './settings/settings.module';
+import { FeaturesModule } from './features/features.controller';
 import { UsersModule } from './users/users.module';
 import { TikTokModule } from './tiktok/tiktok.module';
 
@@ -33,6 +34,7 @@ import { TikTokModule } from './tiktok/tiktok.module';
     MediaModule,
     AuditModule,
     SettingsModule,
+    FeaturesModule,
     AccountsModule,
     AiModule,
     AuthModule,

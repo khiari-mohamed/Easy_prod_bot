@@ -4,6 +4,7 @@ import { CaptionLanguage, Platform, PostFormat } from '@prisma/client';
 import { IsEnum, IsInt, IsOptional, IsString, Max, MaxLength, Min } from 'class-validator';
 import { PrismaService } from '../prisma/prisma.service';
 import { AccountsService } from '../accounts/accounts.service';
+import { FeaturePolicyService } from '../features/feature-policy.service';
 import { AiService } from './ai.service';
 import { GeminiService } from './gemini.service';
 import { PageContext, PageContextService } from './page-context.service';
@@ -34,6 +35,7 @@ export class AiController {
     private readonly pageCtx: PageContextService,
     private readonly accounts: AccountsService,
     private readonly prisma: PrismaService,
+    private readonly policy: FeaturePolicyService,
   ) {}
 
   /** Live page data for a platform, or null (plus a note) when no account is connected / readable. */
@@ -49,6 +51,7 @@ export class AiController {
   async captions(@Body() dto: CaptionsDto) {
     const campaign = await this.prisma.campaign.findFirst({ orderBy: { createdAt: 'asc' } });
     if (!campaign) throw new NotFoundException('No campaign configured');
+    await this.policy.assertHttp({ feature: 'ai.captions', campaignId: campaign.id, action: 'GENERATE' });
 
     const [day, item] = await Promise.all([
       dto.dayId ? this.prisma.campaignDay.findUnique({ where: { id: dto.dayId } }) : Promise.resolve(null),
@@ -125,6 +128,7 @@ export class AiController {
   @Post('hashtags')
   async hashtags(@Body() dto: HashtagsDto) {
     const campaign = await this.prisma.campaign.findFirst({ orderBy: { createdAt: 'asc' } });
+    await this.policy.assertHttp({ feature: 'ai.hashtags', campaignId: campaign?.id, action: 'GENERATE' });
     const officialTags = campaign?.hashtags ?? [];
     if (!this.gemini.enabled) {
       return { hashtags: officialTags, source: 'fallback', reason: 'GEMINI_API_KEY manquante' };

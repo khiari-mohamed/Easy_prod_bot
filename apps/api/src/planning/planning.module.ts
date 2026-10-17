@@ -50,6 +50,7 @@ import { CurrentUser, Roles } from '../auth/decorators';
 import { AuthUser } from '../auth/auth.types';
 import { getEnv } from '../env';
 import { cleanTag, GeminiService, PlanRow } from '../ai/gemini.service';
+import { FeaturePolicyService } from '../features/feature-policy.service';
 import {
   contentMatchesMime,
   DOCX_MIME,
@@ -463,6 +464,7 @@ export class PlanningController {
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
     private readonly gemini: GeminiService,
+    private readonly policy: FeaturePolicyService,
   ) {}
 
   private sourceDir() {
@@ -553,6 +555,9 @@ export class PlanningController {
     let documentHashtags: string[] = [];
 
     if (docMime) {
+      // Administration Center: AI extraction can be switched off. CSV/XLSX imports stay available, and an
+      // extracted plan is ALWAYS verified row by row by a human (planning.verification is locked).
+      await this.policy.assertHttp({ feature: 'planning.ai_extraction', campaignId: campaign?.id });
       if (!this.gemini.enabled) throw new BadRequestException('GEMINI_API_KEY est requise pour importer un PDF, PPTX ou Word.');
       if (!contentMatchesMime(file.buffer, docMime)) {
         throw new BadRequestException('Le contenu du fichier ne correspond pas à son extension.');

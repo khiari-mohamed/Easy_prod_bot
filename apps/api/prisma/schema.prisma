@@ -198,6 +198,7 @@ model User {
   audit            AuditLog[]
   planImports      PlanImport[]
   mediaUploads     MediaUpload[]
+  captionReviews   CaptionReview[]
 }
 
 model Campaign {
@@ -304,8 +305,9 @@ model ContentItem {
   createdBy       User?           @relation("ContentCreator", fields: [createdById], references: [id], onDelete: SetNull)
   createdAt       DateTime        @default(now())
   updatedAt       DateTime        @updatedAt
-  assets          ContentAsset[]
-  posts           Post[]
+  assets             ContentAsset[]
+  posts              Post[]
+  captionSuggestions CaptionSuggestion[]
 
   @@index([campaignId, approvalStatus])
 }
@@ -442,6 +444,7 @@ model Post {
   attempts      PublishAttempt[]
   metrics       MetricSnapshot[]
   commentJobs   CommentJob[]
+  hashtagUsages HashtagUsage[]
 
   // NEW: shared content + language
   contentItemId   String?
@@ -669,3 +672,202 @@ model AuditLog {
   @@index([at])
   @@index([entity, entityId])
 }
+
+// =====================================================================
+// ADMINISTRATION CENTER + AI CONTENT STUDIO (migration 0005)
+// All changes below are additive. Nothing existing is altered.
+// =====================================================================
+
+enum FeatureMode {
+  OFF
+  REVIEW
+  AUTO
+}
+
+enum SettingScope {
+  GLOBAL
+  CAMPAIGN
+  PLATFORM // scopeId = FACEBOOK | INSTAGRAM | TIKTOK
+  ACCOUNT  // scopeId = SocialAccount.id
+}
+
+/// One stored mode per feature and scope. GLOBAL rows use scopeId = "".
+/// A lower scope can only RESTRICT the global mode, never widen it.
+model FeatureConfig {
+  id          String       @id @default(cuid())
+  featureKey  String
+  scope       SettingScope @default(GLOBAL)
+  scopeId     String       @default("")
+  mode        FeatureMode  @default(OFF)
+  config      Json?
+  updatedById String?
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+
+  @@unique([featureKey, scope, scopeId])
+  @@index([scope, scopeId])
+}
+
+/// Immutable history of every administration change.
+model FeatureConfigAudit {
+  id          String       @id @default(cuid())
+  featureKey  String
+  scope       SettingScope
+  scopeId     String       @default("")
+  previous    Json?
+  next        Json
+  changedById String
+  reason      String?
+  createdAt   DateTime     @default(now())
+
+  @@index([featureKey, createdAt])
+}
+
+// ── AI Content Studio ────────────────────────────────────────────────
+
+enum SuggestionStatus {
+  GENERATED      // just came from the model, not yet reviewed
+  NEEDS_REVIEW   // flagged for human attention (e.g. linting warning)
+  APPROVED       // human explicitly approved this exact text
+  REJECTED       // human rejected it; never feed it back to the model
+  SUPERSEDED     // a newer suggestion replaced this one for the same slot
+}
+
+enum HashtagOrigin {
+  MANUAL         // typed by a human
+  AI_GENERATED   // suggested by the model
+  IMPORTED       // extracted from a plan document
+  TREND_SOURCE   // from a verified trend provider
+}
+
+/// One AI-generated caption variant per content item / platform / language.
+model CaptionSuggestion {
+  id            String           @id @default(cuid())
+  contentItemId String?
+  contentItem   ContentItem?     @relation(fields: [contentItemId], references: [id], onDelete: SetNull)
+  platform      Platform
+  language      CaptionLanguage
+  text          String           // generated text
+  editedText    String?          // text after human edits (if any)
+  finalText     String?          // the text that actually went to the post
+  tone          String?          // energetic | emotional | concise | ...
+  status        SuggestionStatus @default(GENERATED)
+  model         String           // e.g. "gemini-2.0-flash"
+  promptVersion String           @default("v1")
+  warnings      String[]         // lint warnings from the generator
+  metadata      Json?            // extra context snapshot (page stats, etc.)
+  createdAt     DateTime         @default(now())
+  updatedAt     DateTime         @updatedAt
+
+  reviews            CaptionReview[]
+  hashtagSuggestions HashtagSuggestion[]
+  feedbacks          GenerationFeedback[]
+
+  @@index([contentItemId, platform, status])
+  @@index([status, createdAt])
+}
+
+/// Human decision on a caption suggestion.
+model CaptionReview {
+  id           String           @id @default(cuid())
+  suggestionId String
+  suggestion   CaptionSuggestion @relation(fields: [suggestionId], references: [id], onDelete: Cascade)
+  reviewerId   String
+  reviewer     User             @relation(fields: [reviewerId], references: [id], onDelete: Cascade)
+  decision     SuggestionStatus // APPROVED | REJECTED | NEEDS_REVIEW
+  editedText   String?          // the human's edited version (if any)
+  feedback     String?          // optional free-text comment
+  reviewedAt   DateTime         @default(now())
+
+  @@index([suggestionId, reviewedAt])
+}
+
+/// Central hashtag library — one row per unique normalised tag.
+model Hashtag {
+  id            String        @id @default(cuid())
+  normalizedTag String        @unique // lowercase, no #, unicode letters only
+  displayTag    String        // original casing as first seen
+  language      CaptionLanguage?
+  category      String?       // film | comedy | drama | tunis | etc.
+  origin        HashtagOrigin @default(MANUAL)
+  notes         String?
+  createdAt     DateTime      @default(now())
+
+  suggestions   HashtagSuggestion[]
+  usages        HashtagUsage[]
+  performance   HashtagPerformance[]
+  trendSignals  TrendSignal[]
+}
+
+/// Which hashtags were included in a caption suggestion, and with what rank.
+model HashtagSuggestion {
+  id                  String            @id @default(cuid())
+  captionSuggestionId String
+  captionSuggestion   CaptionSuggestion @relation(fields: [captionSuggestionId], references: [id], onDelete: Cascade)
+  hashtagId           String
+  hashtag             Hashtag           @relation(fields: [hashtagId], references: [id], onDelete: Cascade)
+  rank                Int               @default(0)
+  reason              String?           // short model explanation
+  status              SuggestionStatus  @default(GENERATED)
+
+  @@unique([captionSuggestionId, hashtagId])
+  @@index([hashtagId, status])
+}
+
+/// Every time a hashtag is actually used on a published post.
+model HashtagUsage {
+  id         String   @id @default(cuid())
+  postId     String
+  post       Post     @relation(fields: [postId], references: [id], onDelete: Cascade)
+  hashtagId  String
+  hashtag    Hashtag  @relation(fields: [hashtagId], references: [id], onDelete: Cascade)
+  platform   Platform
+  usedAt     DateTime @default(now())
+
+  @@unique([postId, hashtagId])
+  @@index([hashtagId, platform, usedAt])
+}
+
+/// Measured engagement metrics for a hashtag on a specific post.
+model HashtagPerformance {
+  id          String   @id @default(cuid())
+  hashtagId   String
+  hashtag     Hashtag  @relation(fields: [hashtagId], references: [id], onDelete: Cascade)
+  platform    Platform
+  postId      String?  // nullable: account-level measurements have no single post
+  impressions Int?
+  reach       Int?
+  engagements Int?
+  measuredAt  DateTime @default(now())
+
+  @@index([hashtagId, platform, measuredAt])
+}
+
+/// Verified external trend observation. Expires automatically.
+model TrendSignal {
+  id          String   @id @default(cuid())
+  platform    Platform
+  hashtagId   String?
+  hashtag     Hashtag? @relation(fields: [hashtagId], references: [id], onDelete: SetNull)
+  rawTag      String   // original tag string (before normalisation)
+  source      String   // "meta_insights" | "manual" | "tiktok_creative_center"
+  region      String   @default("TN") // ISO 3166-1 alpha-2
+  score       Float    @default(0)    // normalised 0..1
+  observedAt  DateTime @default(now())
+  expiresAt   DateTime // stale signals are filtered out automatically
+
+  @@index([platform, expiresAt])
+  @@index([hashtagId, platform])
+}
+
+/// Human rating of a generated suggestion (1-5 stars + optional note).
+model GenerationFeedback {
+  id           String           @id @default(cuid())
+  suggestionId String
+  suggestion   CaptionSuggestion @relation(fields: [suggestionId], references: [id], onDelete: Cascade)
+  rating       Int              // 1..5
+  reason       String?
+  createdAt    DateTime         @default(now())
+}
+
+// Add back-relations on existing models (additive)

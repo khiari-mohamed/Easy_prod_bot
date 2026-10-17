@@ -14,6 +14,7 @@ import { AuthUser } from '../auth/auth.types';
 import { PostsService } from '../posts/posts.service';
 import { withState } from '../posts/post-state';
 import { QueueService } from '../queue/queue.service';
+import { FeaturePolicyService } from '../features/feature-policy.service';
 import {
   ContentAssetDto,
   CreateContentItemDto,
@@ -50,6 +51,7 @@ export class ContentService {
     private readonly ai: AiService,
     private readonly posts: PostsService,
     private readonly queue: QueueService,
+    private readonly policy: FeaturePolicyService,
   ) {}
 
   /** The campaign a new content item belongs to: its plan entry's campaign, else the oldest campaign. */
@@ -284,7 +286,11 @@ export class ContentService {
       let hashtags = item.hashtags;
 
       // Optionally generate a platform-specific caption via AI
-      if (dto.generateCaptions && campaign) {
+      if (
+        dto.generateCaptions &&
+        campaign &&
+        (await this.policy.evaluate({ feature: 'ai.captions', campaignId: campaign.id, action: 'GENERATE' })).allowed
+      ) {
         try {
           const res = await this.ai.captions({ campaign, platform, format, language: lang });
           caption = res.variants[0]?.caption ?? caption;

@@ -24,6 +24,7 @@ import { CurrentUser, Roles } from '../auth/decorators';
 import { AuthUser } from '../auth/auth.types';
 import { AuditService } from '../common/audit.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { FeaturePolicyService } from '../features/feature-policy.service';
 import { AssetsService } from './assets.service';
 import { PART_SIZE_BYTES, UploadSessionService } from './upload-session.service';
 import { CompleteUploadDto, ExternalAssetDto, ImportUrlDto, InitUploadDto, ListAssetsQuery } from './assets.dto';
@@ -55,6 +56,7 @@ export class AssetsController {
     private readonly sessions: UploadSessionService,
     private readonly prisma: PrismaService,
     private readonly audit: AuditService,
+    private readonly policy: FeaturePolicyService,
   ) {}
 
   @Get()
@@ -75,12 +77,14 @@ export class AssetsController {
   )
   async upload(@UploadedFile() file: Express.Multer.File | undefined, @CurrentUser() user: AuthUser) {
     if (!file) throw new BadRequestException('No file received (field name: file)');
+    await this.policy.assertHttp({ feature: 'media.uploads', action: 'UPLOAD' });
     return this.assets.uploadDirect(file.path, file.originalname, file.mimetype, user);
   }
 
   /** Import from a Google Drive / Dropbox / any HTTPS direct link. */
   @Post('import-url')
-  importUrl(@Body() dto: ImportUrlDto, @CurrentUser() user: AuthUser) {
+  async importUrl(@Body() dto: ImportUrlDto, @CurrentUser() user: AuthUser) {
+    await this.policy.assertHttp({ feature: 'media.uploads', action: 'UPLOAD' });
     return this.assets.importUrl(dto, user);
   }
 
@@ -98,7 +102,8 @@ export class AssetsController {
   // ── Resumable uploads ──────────────────────────────────────────────────────
 
   @Post('uploads')
-  init(@Body() dto: InitUploadDto, @CurrentUser() user: AuthUser) {
+  async init(@Body() dto: InitUploadDto, @CurrentUser() user: AuthUser) {
+    await this.policy.assertHttp({ feature: 'media.uploads', action: 'UPLOAD' });
     return this.sessions.init(dto, user);
   }
 

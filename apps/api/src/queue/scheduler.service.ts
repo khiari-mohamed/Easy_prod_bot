@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { PrismaService } from '../prisma/prisma.service';
 import { SettingsService } from '../settings/settings.module';
+import { FeaturePolicyService } from '../features/feature-policy.service';
 import { supportsAutoPublish } from '../posts/post.rules';
 import { withState } from '../posts/post-state';
 import { QueueService } from './queue.service';
@@ -18,6 +19,7 @@ export class SchedulerService {
     private readonly prisma: PrismaService,
     private readonly settings: SettingsService,
     private readonly queue: QueueService,
+    private readonly policy: FeaturePolicyService,
   ) {}
 
   @Cron(CronExpression.EVERY_MINUTE)
@@ -61,6 +63,18 @@ export class SchedulerService {
       });
 
     for (const post of due) {
+      // Administration Center: when scheduled publishing is off for this post's campaign, platform or
+      // account, the post is left exactly as it is. Nothing is queued, and it is never moved forward
+      // silently: once the feature is back on, a slot missed by more than 30 min goes to manual publishing.
+      const scheduling = await this.policy.evaluate({
+        feature: 'publishing.scheduled',
+        campaignId: post.campaignId,
+        platform: post.platform,
+        accountId: post.accountId,
+        action: 'ENQUEUE',
+      });
+      if (!scheduling.allowed) continue;
+
       const lateBy = now.getTime() - post.scheduledAt!.getTime();
       const campaign = post.campaignId ? byId.get(post.campaignId) : undefined;
 
@@ -88,6 +102,20 @@ export class SchedulerService {
 
       if (!supportsAutoPublish(post.platform, post.format)) {
         await toManual(post.id, `Time to publish manually on ${post.platform}`);
+        continue;
+      }
+
+      // Unattended execution needs publishing.auto in AUTO mode for this campaign / platform / account.
+      const autoDecision = await this.policy.evaluate({
+        feature: 'publishing.auto',
+        need: 'AUTO',
+        campaignId: post.campaignId,
+        platform: post.platform,
+        accountId: post.accountId,
+        action: 'ENQUEUE',
+      });
+      if (!autoDecision.allowed) {
+        await toManual(post.id, `Publication automatique désactivée — publiez manuellement (${autoDecision.reason})`);
         continue;
       }
 

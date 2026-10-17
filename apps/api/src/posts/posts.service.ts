@@ -10,6 +10,7 @@ import { Asset, Platform, PostFormat, PostStatus, Prisma } from '@prisma/client'
 import { PrismaService } from '../prisma/prisma.service';
 import { AuditService } from '../common/audit.service';
 import { SettingsService } from '../settings/settings.module';
+import { FeaturePolicyService } from '../features/feature-policy.service';
 import { QueueService } from '../queue/queue.service';
 import { AuthUser } from '../auth/auth.types';
 import { supportsAutoPublish, validateForSubmit } from './post.rules';
@@ -67,6 +68,7 @@ export class PostsService {
     private readonly audit: AuditService,
     private readonly settings: SettingsService,
     private readonly queue: QueueService,
+    private readonly policy: FeaturePolicyService,
   ) {}
 
   list(q: ListPostsQuery) {
@@ -309,6 +311,17 @@ export class PostsService {
       );
     }
     const account = await this.resolvePublishAccount(post);
+
+    // Administration Center: "Publish now" can be switched off globally, per campaign, platform or account.
+    await this.policy.assertHttp({
+      feature: 'publishing.publish_now',
+      need: 'AUTO',
+      campaignId: post.campaignId,
+      platform: post.platform,
+      accountId: account.id,
+      fresh: true,
+      action: 'EXECUTE',
+    });
 
     const previousScheduledAt = post.scheduledAt;
     await this.transition(id, ['APPROVED'], {

@@ -5,6 +5,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { SettingsService } from '../settings/settings.module';
 import { AccountsService } from '../accounts/accounts.service';
 import { PublisherService } from '../publishing/publisher.service';
+import { FeaturePolicyService } from '../features/feature-policy.service';
 import { MetaApiError } from '../meta/graph.client';
 import { MetaBlockedError, metaGuard } from '../meta/meta-guard';
 import { supportsAutoPublish } from '../posts/post.rules';
@@ -22,6 +23,7 @@ export class PublishWorker implements OnModuleInit, OnModuleDestroy {
     private readonly settings: SettingsService,
     private readonly accounts: AccountsService,
     private readonly publisher: PublisherService,
+    private readonly policy: FeaturePolicyService,
   ) {}
 
   onModuleInit() {
@@ -305,20 +307,44 @@ export class PublishWorker implements OnModuleInit, OnModuleDestroy {
     return a;
   }
 
-  /**
-   * Final authorization check, immediately before the Meta call. Returns false (and hands the post back,
-   * never publishing) when publishing was paused or the post is no longer approved/claimed.
-   */
   private async stillAllowed(postId: string): Promise<boolean> {
     const cur = await this.prisma.post.findUnique({
       where: { id: postId },
-      select: { status: true, approvalStatus: true, campaign: { select: { publishingPaused: true } } },
+      select: {
+        status: true,
+        approvalStatus: true,
+        platform: true,
+        campaignId: true,
+        accountId: true,
+        publishNowAuthorizedAt: true,
+        campaign: { select: { publishingPaused: true } },
+      },
     });
     if (!cur || cur.status !== 'PUBLISHING' || cur.approvalStatus !== 'APPROVED') return false;
     if ((await this.settings.isPaused()) || cur.campaign?.publishingPaused) {
       await this.prisma.post.updateMany({
         where: { id: postId, status: 'PUBLISHING' },
         data: withState('APPROVED', { statusNote: 'Publishing was paused: returned to the schedule' }),
+      });
+      return false;
+    }
+
+    // Administration Center: the policy is re-read (no cache) right before the external call, so a
+    // switch flipped or an emergency stop pressed after the job was queued still stops it.
+    // A "publish now" post needs publishing.publish_now; any other post needs publishing.auto in AUTO mode.
+    const decision = await this.policy.evaluate({
+      feature: cur.publishNowAuthorizedAt ? 'publishing.publish_now' : 'publishing.auto',
+      need: 'AUTO',
+      campaignId: cur.campaignId,
+      platform: cur.platform,
+      accountId: cur.accountId,
+      fresh: true,
+      action: 'EXECUTE',
+    });
+    if (!decision.allowed) {
+      await this.prisma.post.updateMany({
+        where: { id: postId, status: 'PUBLISHING' },
+        data: withState('APPROVED', { statusNote: `Bloqué par l'administration : ${decision.reason}` }),
       });
       return false;
     }

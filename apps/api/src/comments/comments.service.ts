@@ -10,6 +10,7 @@ import {
   AmbiguousError, CommentPlatform, deleteComment, hideComment, listComments, postComment, RemoteComment, replyToComment,
 } from './comment-graph';
 import { commentAutomationEnabled, MetaBlockedError, metaGuard } from '../meta/meta-guard';
+import { FeaturePolicyService } from '../features/feature-policy.service';
 
 const PLATFORMS: Platform[] = ['FACEBOOK', 'INSTAGRAM'];
 // Scopes to verify in the Meta dashboard. Informational only: Graph's own error is the source of truth.
@@ -36,13 +37,28 @@ export class CommentsService {
     private readonly prisma: PrismaService,
     private readonly accounts: AccountsService,
     private readonly settings: SettingsService,
+    private readonly policy: FeaturePolicyService,
   ) {}
 
   // ------------------------------------------------------------ config
 
   async getConfig(): Promise<CommentConfig> {
     const row = await this.prisma.setting.findUnique({ where: { key: CONFIG_KEY } });
-    return sanitizeConfig(row?.value, DEFAULT_CONFIG);
+    const cfg = sanitizeConfig(row?.value, DEFAULT_CONFIG);
+    // Administration Center: the on/off switches live in FeatureConfig (one source of truth). Templates,
+    // blocked words and limits stay in this setting.
+    const [first, reply, moderation] = await Promise.all([
+      this.policy.globalModeOf('comments.first_comment'),
+      this.policy.globalModeOf('comments.reply'),
+      this.policy.globalModeOf('comments.moderation'),
+    ]);
+    return {
+      ...cfg,
+      firstComment: first !== 'OFF',
+      aiReply: reply !== 'OFF',
+      autoReply: reply === 'AUTO',
+      moderation: moderation !== 'OFF',
+    };
   }
 
   async setConfig(patch: Record<string, unknown>, userId?: string) {
@@ -53,6 +69,9 @@ export class CommentsService {
     if (!next.firstComment) next.firstCommentSince = null;
     const value = next as unknown as Prisma.InputJsonValue;
     await this.prisma.setting.upsert({ where: { key: CONFIG_KEY }, create: { key: CONFIG_KEY, value }, update: { value } });
+    await this.policy.setGlobalFromLegacy('comments.first_comment', next.firstComment ? 'AUTO' : 'OFF', userId);
+    await this.policy.setGlobalFromLegacy('comments.reply', next.autoReply ? 'AUTO' : next.aiReply ? 'REVIEW' : 'OFF', userId);
+    await this.policy.setGlobalFromLegacy('comments.moderation', next.moderation ? 'AUTO' : 'OFF', userId);
     await this.audit(userId, 'comments.config.update', 'Setting', CONFIG_KEY, { before: current, after: next });
     return next;
   }
@@ -202,7 +221,14 @@ export class CommentsService {
 
   private async createFirstCommentJobs() {
     const cfg = await this.getConfig();
-    if (!cfg.firstComment || !cfg.firstCommentSince) return;
+    if (!cfg.firstComment) return;
+    if (!cfg.firstCommentSince) {
+      // Switched on from the Administration Center: start the clock now so old posts never get a comment.
+      const row = await this.prisma.setting.findUnique({ where: { key: CONFIG_KEY } });
+      const value = { ...sanitizeConfig(row?.value, DEFAULT_CONFIG), firstCommentSince: new Date().toISOString() } as unknown as Prisma.InputJsonValue;
+      await this.prisma.setting.upsert({ where: { key: CONFIG_KEY }, create: { key: CONFIG_KEY, value }, update: { value } });
+      return;
+    }
     const since = new Date(Math.max(Date.parse(cfg.firstCommentSince), Date.now() - 24 * 3600_000));
     const posts = await this.prisma.post.findMany({
       where: {
@@ -216,6 +242,14 @@ export class CommentsService {
       take: 50,
     });
     for (const post of posts) {
+      const allowed = await this.policy.evaluate({
+        feature: 'comments.first_comment',
+        need: 'AUTO',
+        campaignId: post.campaignId,
+        platform: post.platform,
+        accountId: post.accountId,
+      });
+      if (!allowed.allowed) continue;
       const account = await this.accountFor(post);
       const text = this.renderFirstComment(cfg.firstCommentTemplate, post);
       await this.prisma.commentJob.create({
@@ -249,7 +283,7 @@ export class CommentsService {
     // A crash in the middle of a send must never lead to a blind retry.
     await this.prisma.commentJob.updateMany({
       where: { status: 'SENDING', updatedAt: { lt: new Date(Date.now() - 5 * 60_000) } },
-      data: { status: 'NEEDS_CHECK', error: 'Interrompu pendant l’envoi : vérifiez sur la plateforme' },
+      data: { status: 'NEEDS_CHECK', error: "Interrompu pendant l'envoi : vérifiez sur la plateforme" },
     });
 
     const jobs = await this.prisma.commentJob.findMany({ where: { status: 'APPROVED', kind: { in: kinds } }, orderBy: { createdAt: 'asc' }, take: 3 });
@@ -262,7 +296,37 @@ export class CommentsService {
     }
   }
 
+  /**
+   * Last check before the external call, re-read without cache. A job that is no longer allowed goes back
+   * to a human decision (reply) or is cancelled (first comment): it is never sent later by surprise.
+   */
+  private async blockedByAdministration(job: CommentJob): Promise<boolean> {
+    const post = job.postId
+      ? await this.prisma.post.findUnique({ where: { id: job.postId }, select: { campaignId: true } })
+      : null;
+    const d = await this.policy.evaluate({
+      feature: job.kind === 'FIRST_COMMENT' ? 'comments.first_comment' : 'comments.reply',
+      need: job.kind === 'FIRST_COMMENT' || job.auto ? 'AUTO' : 'REVIEW',
+      campaignId: post?.campaignId,
+      platform: job.platform,
+      accountId: job.accountId,
+      fresh: true,
+      action: 'EXECUTE',
+    });
+    if (d.allowed) return false;
+    const note = `Bloqué par l'administration : ${d.reason}`;
+    await this.prisma.commentJob.update({
+      where: { id: job.id },
+      data:
+        job.kind === 'FIRST_COMMENT'
+          ? { status: 'SKIPPED', note }
+          : { status: 'PENDING_APPROVAL', auto: false, approvedAt: null, approvedById: null, note },
+    });
+    return true;
+  }
+
   private async send(job: CommentJob) {
+    if (await this.blockedByAdministration(job)) return;
     const finish = (data: Prisma.CommentJobUpdateInput) =>
       this.prisma.commentJob.update({ where: { id: job.id }, data }).then(() => this.audit(undefined, `comments.job.${String(data.status).toLowerCase()}`, 'CommentJob', job.id));
     const account = job.accountId ? await this.prisma.socialAccount.findUnique({ where: { id: job.accountId } }) : null;
@@ -367,6 +431,10 @@ export class CommentsService {
     if (seen) return;
     ctx.summary.comments++;
 
+    const polCtx = { campaignId: post.campaignId, platform: post.platform, accountId: account.id };
+    const moderationOn = (await this.policy.evaluate({ ...polCtx, feature: 'comments.moderation', need: 'AUTO' })).allowed;
+    const replyDecision = await this.policy.evaluate({ ...polCtx, feature: 'comments.reply' });
+
     const base = {
       platform: post.platform,
       postId: post.id,
@@ -377,7 +445,7 @@ export class CommentsService {
       incomingText: c.text.slice(0, 2000),
     };
 
-    if (cfg.moderation) {
+    if (cfg.moderation && moderationOn) {
       const reason = this.moderationReason(c.text, cfg);
       if (reason) {
         const token = this.accounts.token(account);
@@ -394,7 +462,7 @@ export class CommentsService {
       }
     }
 
-    if (!(cfg.aiReply || cfg.autoReply) || !c.text.trim()) return;
+    if (!replyDecision.allowed || !(cfg.aiReply || cfg.autoReply) || !c.text.trim()) return;
     if (!hasAiKey()) {
       if (!this.warnedNoKey) this.log.warn('ANTHROPIC_API_KEY manquante : réponses IA désactivées');
       this.warnedNoKey = true;
@@ -418,7 +486,7 @@ export class CommentsService {
 
     const lint = lintForAuto(s.text);
     const underCap = ctx.autoCount < cfg.autoReplyMaxPerHour;
-    const auto = cfg.autoReply && lint === null && underCap;
+    const auto = cfg.autoReply && replyDecision.mode === 'AUTO' && lint === null && underCap;
     await this.create({
       ...base,
       kind: 'REPLY',

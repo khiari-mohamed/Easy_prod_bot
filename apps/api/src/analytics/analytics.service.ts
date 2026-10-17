@@ -9,6 +9,7 @@ import { InsightsService } from './insights.service';
 import { ImportRowDto } from './analytics.dto';
 import { dayKey, previousRange, Range } from './analytics-range';
 import { backgroundSyncEnabled, metaGuard } from '../meta/meta-guard';
+import { FeaturePolicyService } from '../features/feature-policy.service';
 
 const PLATFORMS: Platform[] = ['INSTAGRAM', 'FACEBOOK', 'TIKTOK'];
 
@@ -27,6 +28,7 @@ export class AnalyticsService {
     private readonly prisma: PrismaService,
     private readonly accounts: AccountsService,
     private readonly insights: InsightsService,
+    private readonly policy: FeaturePolicyService,
   ) {}
 
   /**
@@ -173,14 +175,16 @@ export class AnalyticsService {
   @Cron('0 0 */2 * * *')
   async scheduledSync() {
     if (!backgroundSyncEnabled() || metaGuard.isOpen()) return; // META_BACKGROUND_SYNC=false to disable
+    // Administration Center: automatic collection can be off globally or stopped by the emergency stop.
+    if (!(await this.policy.evaluate({ feature: 'analytics.collection', fresh: true, action: 'EXECUTE' })).allowed) return;
     try {
-      await this.sync();
+      await this.sync({ automatic: true });
     } catch (e) {
       this.log.error(`Metric sync failed: ${(e as Error).message}`);
     }
   }
 
-  async sync() {
+  async sync(opts: { automatic?: boolean } = {}) {
     if (metaGuard.isOpen()) {
       return { checked: 0, updated: 0, skipped: 0, paused: metaGuard.status().reason };
     }
@@ -202,6 +206,14 @@ export class AnalyticsService {
     let skipped = 0;
     for (const post of posts) {
       if (metaGuard.isOpen()) break;
+      // Automatic runs honour per-platform and per-account restrictions; a manual sync by an approver does not.
+      if (
+        opts.automatic &&
+        !(await this.policy.evaluate({ feature: 'analytics.collection', platform: post.platform, accountId: post.accountId })).allowed
+      ) {
+        skipped++;
+        continue;
+      }
       // Do not re-read what was read recently: 90 min for posts under 48 h old, 12 h for older ones.
       const ageMs = Date.now() - (post.publishedAt?.getTime() ?? Date.now());
       const minGapMs = ageMs < 48 * 3600_000 ? 90 * 60_000 : 12 * 3600_000;
