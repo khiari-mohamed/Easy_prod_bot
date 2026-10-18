@@ -505,7 +505,120 @@ export class CommentsService {
     try {
       await this.prisma.commentJob.create({ data });
     } catch (e) {
-      if ((e as { code?: string }).code !== 'P2002') throw e; // unique(platform, remoteCommentId): already handled
+      if ((e as { code?: string }).code !== 'P2002') throw e;
     }
+  }
+
+  // ------------------------------------------------------------ manual comment
+
+  async listPostsForManualComment(platform?: string) {
+    const where: Prisma.PostWhereInput = {
+      status: 'PUBLISHED',
+      externalId: { not: null },
+      platform: { in: PLATFORMS },
+    };
+    if (platform === 'FACEBOOK') where.platform = 'FACEBOOK';
+    else if (platform === 'INSTAGRAM') where.platform = 'INSTAGRAM';
+
+    const dbPosts = await this.prisma.post.findMany({
+      where,
+      orderBy: { publishedAt: 'desc' },
+      take: 100,
+      select: { id: true, platform: true, caption: true, externalId: true, externalUrl: true, publishedAt: true, accountId: true },
+    });
+
+    // Also fetch live from Meta for posts not in DB (published outside the app)
+    const livePosts: typeof dbPosts = [];
+    for (const p of PLATFORMS) {
+      if (platform && platform !== 'BOTH' && platform !== p) continue;
+      const account = await this.accounts.activeFor(p);
+      if (!account) continue;
+      try {
+        const token = this.accounts.token(account);
+        const pageId = account.externalId;
+        const fields = p === 'INSTAGRAM'
+          ? `id,caption,timestamp,permalink`
+          : `id,message,created_time,permalink_url`;
+        const { graph } = await import('../meta/graph.client');
+        const res = await graph<{ data?: { id: string; caption?: string; message?: string; timestamp?: string; created_time?: string; permalink?: string; permalink_url?: string }[] }>(
+          'GET', p === 'INSTAGRAM' ? `${pageId}/media` : `${pageId}/posts`,
+          { fields, limit: '20' }, token,
+        );
+        for (const item of res.data ?? []) {
+          if (dbPosts.some((d) => d.externalId === item.id)) continue; // already in DB
+          livePosts.push({
+            id: `live:${item.id}`,
+            platform: p,
+            caption: (item.caption ?? item.message ?? '').slice(0, 200),
+            externalId: item.id,
+            externalUrl: item.permalink ?? item.permalink_url ?? null,
+            publishedAt: item.timestamp ? new Date(item.timestamp) : item.created_time ? new Date(item.created_time) : null,
+            accountId: account.id,
+          });
+        }
+      } catch (e) {
+        this.log.warn(`listPostsForManualComment ${p}: ${(e as Error).message}`);
+      }
+    }
+
+    return [...dbPosts, ...livePosts].sort((a, b) => (b.publishedAt?.getTime() ?? 0) - (a.publishedAt?.getTime() ?? 0));
+  }
+
+  async createManualCommentJobs(
+    targets: { postId: string; text?: string }[],
+    sharedText: string | undefined,
+    platform: string,
+    userId?: string,
+  ) {
+    if (!targets.length) throw new BadRequestException('Aucun post sélectionné');
+    const created: string[] = [];
+    for (const t of targets) {
+      const text = (t.text?.trim() || sharedText?.trim() || '');
+      if (!text) throw new BadRequestException(`Texte manquant pour le post ${t.postId}`);
+      if (text.length > 2200) throw new BadRequestException('Texte trop long (max 2200 caractères)');
+
+      // Resolve post — supports both DB posts and live: prefixed ids
+      const isLive = t.postId.startsWith('live:');
+      const externalId = isLive ? t.postId.replace('live:', '') : null;
+      let postId: string | null = null;
+      let remoteMediaId: string | null = externalId;
+      let postPlatform: string = platform === 'BOTH' ? 'INSTAGRAM' : platform;
+      let accountId: string | null = null;
+
+      if (!isLive) {
+        const post = await this.prisma.post.findUnique({
+          where: { id: t.postId },
+          select: { id: true, externalId: true, platform: true, accountId: true },
+        });
+        if (!post) throw new BadRequestException(`Post introuvable : ${t.postId}`);
+        postId = post.id;
+        remoteMediaId = post.externalId;
+        postPlatform = post.platform;
+        accountId = post.accountId;
+      } else {
+        // live post: find the active account for the platform
+        const acc = await this.accounts.activeFor(postPlatform as 'FACEBOOK' | 'INSTAGRAM');
+        accountId = acc?.id ?? null;
+      }
+
+      if (!remoteMediaId) throw new BadRequestException(`Le post ${t.postId} n'a pas d'identifiant Meta`);
+
+      await this.prisma.commentJob.create({
+        data: {
+          platform: postPlatform as 'FACEBOOK' | 'INSTAGRAM',
+          kind: 'FIRST_COMMENT',
+          status: 'PENDING_APPROVAL',
+          postId,
+          accountId,
+          remoteMediaId,
+          text,
+          aiGenerated: false,
+          auto: false,
+        },
+      });
+      created.push(t.postId);
+    }
+    await this.audit(userId, 'comments.manual.create', 'CommentJob', 'batch', { count: created.length });
+    return { created: created.length };
   }
 }

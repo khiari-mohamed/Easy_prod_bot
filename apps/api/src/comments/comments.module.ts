@@ -1,10 +1,24 @@
 import { Body, Controller, Get, Module, Param, Patch, Post, Query, Req } from '@nestjs/common';
+import { IsArray, IsIn, IsNotEmpty, IsOptional, IsString, MaxLength, ValidateNested, ArrayMaxSize } from 'class-validator';
+import { Type } from 'class-transformer';
 import { Role } from '@prisma/client';
 import { Roles } from '../auth/decorators';
 import { CommentsService } from './comments.service';
 
-type Req_ = { user?: { id?: string } }; // adjust if your auth guard puts the user elsewhere
+type Req_ = { user?: { id?: string } };
 const uid = (r: Req_) => r.user?.id;
+
+class ManualCommentTargetDto {
+  @IsString() @IsNotEmpty() postId!: string;
+  @IsOptional() @IsString() @MaxLength(2200) text?: string;
+}
+
+class ManualCommentDto {
+  @IsArray() @ArrayMaxSize(50) @ValidateNested({ each: true }) @Type(() => ManualCommentTargetDto)
+  targets!: ManualCommentTargetDto[];
+  @IsOptional() @IsString() @MaxLength(2200) sharedText?: string;
+  @IsIn(['FACEBOOK', 'INSTAGRAM', 'TIKTOK', 'BOTH']) platform!: string;
+}
 
 @Controller('comments')
 export class CommentsController {
@@ -62,6 +76,18 @@ export class CommentsController {
   @Roles(Role.APPROVER)
   poll() {
     return this.comments.poll();
+  }
+
+  @Get('posts')
+  @Roles(Role.APPROVER)
+  listPosts(@Query('platform') platform?: string) {
+    return this.comments.listPostsForManualComment(platform);
+  }
+
+  @Post('manual')
+  @Roles(Role.APPROVER)
+  manual(@Body() dto: ManualCommentDto, @Req() req: Req_) {
+    return this.comments.createManualCommentJobs(dto.targets, dto.sharedText, dto.platform, uid(req));
   }
 }
 

@@ -90,6 +90,27 @@ export function PageTitle({ title, subtitle, children }: { title: string; subtit
   );
 }
 
+export function ConfirmDialog({
+  open, title, message, confirmLabel = 'Confirmer', danger = false, onConfirm, onCancel,
+}: {
+  open: boolean; title: string; message: string; confirmLabel?: string; danger?: boolean;
+  onConfirm: () => void; onCancel: () => void;
+}) {
+  if (!open) return null;
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" role="dialog" aria-modal aria-labelledby="cdlg-title">
+      <div className="w-full max-w-sm rounded-xl bg-white p-5 shadow-xl">
+        <h2 id="cdlg-title" className="text-base font-bold">{title}</h2>
+        <p className="mt-1 text-sm text-neutral-600">{message}</p>
+        <div className="mt-4 flex justify-end gap-2">
+          <button className="btn" onClick={onCancel}>Annuler</button>
+          <button className={`btn ${danger ? 'btn-danger' : 'btn-primary'}`} onClick={onConfirm}>{confirmLabel}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function EmptyState({ title, hint, children }: { title: string; hint?: string; children?: React.ReactNode }) {
   return (
     <div className="rounded-xl border border-dashed border-neutral-300 bg-white/60 px-4 py-8 text-center">
@@ -126,56 +147,6 @@ export function Toggle({
     >
       <span className={`inline-block h-4 w-4 rounded-full bg-white shadow transition-transform ${checked ? 'translate-x-6' : 'translate-x-1'}`} />
     </button>
-  );
-}
-
-const MODE_LABEL: Record<FeatureMode, string> = { OFF: 'Désactivé', REVIEW: 'Validation', AUTO: 'Automatique' };
-const MODE_TONE: Record<FeatureMode, string> = {
-  OFF: 'bg-neutral-100 text-neutral-600',
-  REVIEW: 'bg-amber-50 text-amber-800',
-  AUTO: 'bg-emerald-50 text-emerald-800',
-};
-
-export const modeLabel = (m: FeatureMode) => MODE_LABEL[m] ?? m;
-
-export function ModeBadge({ mode }: { mode: FeatureMode }) {
-  return <span className={`rounded-full px-2 py-0.5 text-xs font-semibold ${MODE_TONE[mode] ?? MODE_TONE.OFF}`}>{MODE_LABEL[mode] ?? mode}</span>;
-}
-
-/** Segmented OFF / REVIEW / AUTO control. Only the modes in `options` are offered. */
-export function ModeSwitch({
-  value,
-  options,
-  onChange,
-  disabled,
-  label,
-}: {
-  value: FeatureMode;
-  options: FeatureMode[];
-  onChange: (m: FeatureMode) => void;
-  disabled?: boolean;
-  label: string;
-}) {
-  return (
-    <div role="radiogroup" aria-label={label} className="inline-flex overflow-hidden rounded-lg border border-line bg-white text-xs font-semibold">
-      {options.map((m) => {
-        const active = m === value;
-        const on = m === 'OFF' ? 'bg-neutral-700 text-white' : m === 'REVIEW' ? 'bg-amber-500 text-white' : 'bg-emerald-500 text-white';
-        return (
-          <button
-            key={m}
-            type="button"
-            role="radio"
-            aria-checked={active}
-            disabled={disabled}
-            onClick={() => onChange(m)}
-            className={`px-3 py-1.5 transition-colors disabled:opacity-50 ${active ? on : 'text-neutral-600 hover:bg-neutral-50'}`}
-          >
-            {MODE_LABEL[m]}
-          </button>
-        );
-      })}
-    </div>
   );
 }
 

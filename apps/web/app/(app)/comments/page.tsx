@@ -179,6 +179,127 @@ function JobsList({ status, onChange }: { status: string; onChange: () => void }
   );
 }
 
+interface PostOption {
+  id: string; platform: Platform; caption: string; externalId: string | null;
+  externalUrl: string | null; publishedAt: string | null;
+}
+
+function ManualComment({ onChange }: { onChange: () => void }) {
+  const [platformFilter, setPlatformFilter] = useState<'BOTH' | 'FACEBOOK' | 'INSTAGRAM' | 'TIKTOK'>('BOTH');
+  const posts = useFetch<PostOption[]>(`/comments/posts?platform=${platformFilter}`);
+  const [selected, setSelected] = useState<Record<string, string>>({}); // postId -> text (empty = use shared)
+  const [sharedText, setSharedText] = useState('');
+  const [useShared, setUseShared] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [done, setDone] = useState<string | null>(null);
+
+  const toggle = (id: string) =>
+    setSelected((s) => { const n = { ...s }; if (id in n) delete n[id]; else n[id] = ''; return n; });
+  const setText = (id: string, t: string) => setSelected((s) => ({ ...s, [id]: t }));
+  const selectedIds = Object.keys(selected);
+
+  async function submit() {
+    setBusy(true); setError(null); setDone(null);
+    try {
+      const targets = selectedIds.map((id) => ({ postId: id, text: useShared ? undefined : selected[id] }));
+      const r = await api<{ created: number }>('/comments/manual', {
+        method: 'POST',
+        body: { targets, sharedText: useShared ? sharedText : undefined, platform: platformFilter as string },
+      });
+      setDone(`${r.created} commentaire(s) ajouté(s) à la file d'approbation.`);
+      setSelected({});
+      setSharedText('');
+      onChange();
+    } catch (e) { setError((e as Error).message); }
+    finally { setBusy(false); }
+  }
+
+  return (
+    <div className="card space-y-3">
+      <h2 className="font-bold">Commenter un post manuellement</h2>
+      <p className="text-xs text-neutral-500">Sélectionnez un ou plusieurs posts, rédigez le commentaire, puis approuvez-le dans l'onglet « À valider ».</p>
+
+      <div className="flex flex-wrap gap-2">
+        {(['BOTH', 'INSTAGRAM', 'FACEBOOK', 'TIKTOK'] as const).map((p) => (
+          <button key={p} onClick={() => { setPlatformFilter(p); setSelected({}); }}
+            className={`rounded-full border px-3 py-1 text-xs font-medium ${
+              platformFilter === p ? 'border-neutral-900 bg-neutral-900 text-white' : 'border-neutral-200 bg-white text-neutral-600 hover:bg-neutral-50'
+            }`}>
+            {p === 'BOTH' ? 'Toutes plateformes' : p}
+          </button>
+        ))}
+      </div>
+
+      {posts.loading && <Loading />}
+      <ErrorNote message={posts.error} />
+
+      {posts.data && posts.data.length === 0 && (
+        <p className="text-sm text-neutral-500">Aucun post publié trouvé.</p>
+      )}
+
+      {posts.data && posts.data.length > 0 && (
+        <ul className="max-h-72 divide-y divide-neutral-100 overflow-y-auto rounded-lg border border-line">
+          {posts.data.map((p) => (
+            <li key={p.id} className={`flex items-start gap-3 px-3 py-2 text-sm ${
+              p.id in selected ? 'bg-sky-50' : 'bg-white'
+            }`}>
+              <input type="checkbox" className="mt-1 shrink-0" checked={p.id in selected}
+                onChange={() => toggle(p.id)} />
+              <div className="min-w-0 flex-1">
+                <div className="flex flex-wrap items-center gap-2">
+                  <PlatformTag platform={p.platform} />
+                  {p.publishedAt && <span className="text-xs text-neutral-400">{fmtDateTime(p.publishedAt)}</span>}
+                  {p.externalUrl && <a href={p.externalUrl} target="_blank" rel="noreferrer" className="text-xs text-sky-600 underline">Voir ↗</a>}
+                </div>
+                <p className="mt-0.5 truncate text-xs text-neutral-600" dir="auto">{p.caption || '(sans légende)'}</p>
+                {!useShared && p.id in selected && (
+                  <textarea
+                    className="input mt-1 min-h-16 text-xs"
+                    dir="auto"
+                    placeholder="Commentaire pour ce post…"
+                    value={selected[p.id]}
+                    onChange={(e) => setText(p.id, e.target.value)}
+                  />
+                )}
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {selectedIds.length > 0 && (
+        <div className="space-y-2">
+          <label className="flex items-center gap-2 text-sm">
+            <input type="checkbox" checked={useShared} onChange={(e) => setUseShared(e.target.checked)} />
+            Même commentaire pour tous les posts sélectionnés ({selectedIds.length})
+          </label>
+          {useShared && (
+            <textarea
+              className="input min-h-20"
+              dir="auto"
+              placeholder="Commentaire à poster sur tous les posts sélectionnés…"
+              value={sharedText}
+              onChange={(e) => setSharedText(e.target.value)}
+            />
+          )}
+        </div>
+      )}
+
+      {done && <p className="text-sm text-green-700">{done}</p>}
+      <ErrorNote message={error} />
+
+      <button
+        className="btn btn-primary"
+        disabled={busy || selectedIds.length === 0 || (useShared && !sharedText.trim())}
+        onClick={submit}
+      >
+        {busy ? 'Envoi…' : `Soumettre pour approbation (${selectedIds.length} post${selectedIds.length > 1 ? 's' : ''})`}
+      </button>
+    </div>
+  );
+}
+
 export default function CommentsPage() {
   const status = useFetch<Status>('/comments/status');
   const [tab, setTab] = useState('PENDING_APPROVAL');
@@ -235,6 +356,8 @@ export default function CommentsPage() {
         </div>
         <JobsList key={`${tab}-${version}`} status={tab} onChange={status.reload} />
       </div>
+
+      <ManualComment onChange={() => { status.reload(); setVersion((v) => v + 1); }} />
     </div>
   );
 }

@@ -4,7 +4,7 @@ import Link from 'next/link';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { api, useFetch } from '@/lib/api';
 import type { Me, Platform, PlanActionType, PlanImport, PlanImportRow, PostFormat } from '@/lib/types';
-import { ErrorNote, Loading, PageTitle } from '@/components/ui';
+import { ErrorNote, Loading, PageTitle, ConfirmDialog } from '@/components/ui';
 
 const ACCEPT = [
   '.csv', '.txt', '.pdf', '.pptx', '.docx',
@@ -93,6 +93,7 @@ function RowCard({
   const [draft, setDraft] = useState<Draft>(() => toDraft(row));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState(false);
 
   // Server state is the truth: reset the form whenever the row comes back from the API.
   useEffect(() => setDraft(toDraft(row)), [row]);
@@ -231,7 +232,7 @@ function RowCard({
             <button
               className="btn text-xs text-red-600"
               disabled={busy}
-              onClick={() => window.confirm('Supprimer cette ligne du plan ?') && call(() => api(base, { method: 'DELETE' }))}
+              onClick={() => setConfirmDelete(true)}
             >
               Supprimer la ligne
             </button>
@@ -239,6 +240,15 @@ function RowCard({
         </div>
       )}
       <ErrorNote message={error} />
+      <ConfirmDialog
+        open={confirmDelete}
+        title="Supprimer cette ligne ?"
+        message="Cette action est irréversible."
+        confirmLabel="Supprimer"
+        danger
+        onConfirm={() => { setConfirmDelete(false); call(() => api(base, { method: 'DELETE' })); }}
+        onCancel={() => setConfirmDelete(false)}
+      />
     </div>
   );
 }
@@ -262,6 +272,8 @@ function ImportCard({
   const [filter, setFilter] = useState<Filter>('all');
   const [page, setPage] = useState(1);
   const [done, setDone] = useState<{ message: string; drafts: number } | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [confirmCommit, setConfirmCommit] = useState(false);
   const data = detail.data;
   const meta = data?.meta;
   const docTags = meta?.documentHashtags ?? [];
@@ -296,7 +308,6 @@ function ImportCard({
 
   const commit = () =>
     run(async () => {
-      if (!window.confirm('Valider ce plan et créer les entrées du calendrier ? Rien ne sera publié automatiquement.')) return;
       const r = await api<{ created: number; skipped: number; drafts: number; tasks: number }>(`/planning/imports/${imp.id}/commit`, {
         method: 'POST',
         body: { addHashtags: picked },
@@ -314,7 +325,6 @@ function ImportCard({
   const addRow = () => run(async () => { await api(`/planning/imports/${imp.id}/rows`, { method: 'POST', body: { label: 'Nouvelle action' } }); refresh(); });
   const remove = () =>
     run(async () => {
-      if (!window.confirm('Supprimer cet import ?')) return;
       await api(`/planning/imports/${imp.id}`, { method: 'DELETE' });
       onRefresh();
     });
@@ -335,11 +345,11 @@ function ImportCard({
         <div className="flex flex-wrap gap-2">
           <button className="btn text-xs" onClick={() => setOpen((v) => !v)}>{open ? 'Masquer' : imp.status === 'PREVIEW' ? 'Vérifier le plan' : 'Voir les lignes'}</button>
           {isApprover && imp.status === 'PREVIEW' && open && (
-            <button className="btn btn-primary text-xs" disabled={busy || !ready} onClick={commit} title={ready ? '' : 'Corrigez les erreurs et vérifiez toutes les lignes'}>
+            <button className="btn btn-primary text-xs" disabled={busy || !ready} onClick={() => setConfirmCommit(true)} title={ready ? '' : 'Corrigez les erreurs et vérifiez toutes les lignes'}>
               {busy ? 'Validation…' : 'Valider le plan'}
             </button>
           )}
-          {isApprover && <button className="btn text-xs text-red-600" disabled={busy} onClick={remove}>Supprimer</button>}
+          {isApprover && <button className="btn text-xs text-red-600" disabled={busy} onClick={() => setConfirmDelete(true)}>Supprimer</button>}
         </div>
       </div>
             <ErrorNote message={error ?? detail.error} />
@@ -438,6 +448,23 @@ function ImportCard({
           </div>
         </div>
       )}
+      <ConfirmDialog
+        open={confirmCommit}
+        title="Valider ce plan ?"
+        message="Les entrées du calendrier seront créées. Rien ne sera publié automatiquement."
+        confirmLabel="Valider le plan"
+        onConfirm={() => { setConfirmCommit(false); commit(); }}
+        onCancel={() => setConfirmCommit(false)}
+      />
+      <ConfirmDialog
+        open={confirmDelete}
+        title="Supprimer cet import ?"
+        message="Le plan et toutes ses lignes seront supprimés définitivement."
+        confirmLabel="Supprimer"
+        danger
+        onConfirm={() => { setConfirmDelete(false); remove(); }}
+        onCancel={() => setConfirmDelete(false)}
+      />
     </div>
   );
 }
