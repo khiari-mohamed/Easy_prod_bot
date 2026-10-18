@@ -7,6 +7,7 @@ export interface StorableAsset {
   id: string;
   storageKey: string | null;
   storedAs: string | null;
+  url?: string | null;
 }
 
 /** Turns a stored key into a URL. Display URLs are stable; publish URLs expire. */
@@ -21,7 +22,7 @@ export class MediaService {
   /** Stable URL for the dashboard (<img>, <video>, downloads). */
   displayUrl(asset: StorableAsset): string {
     const key = this.keyOf(asset);
-    if (!key) return '';
+    if (!key) return asset.url ?? '';
     // For local storage there is no public file server — use the signed access endpoint.
     if (this.storage.provider === 'LOCAL') return signedMediaUrl(asset.id);
     return this.storage.publicUrl(key) ?? signedMediaUrl(asset.id);
@@ -33,7 +34,10 @@ export class MediaService {
    */
   async publishUrl(asset: StorableAsset, ttlSeconds?: number): Promise<string> {
     const key = this.keyOf(asset);
-    if (!key) throw new NotFoundException('The asset has no stored file');
+    if (!key) {
+      if (asset.url) return asset.url;
+      throw new NotFoundException('The asset has no stored file');
+    }
     const ttl = ttlSeconds ?? getEnv().MEDIA_URL_TTL_SECONDS;
     // For local storage there is no public file server — use the signed access endpoint.
     if (this.storage.provider === 'LOCAL') return signedMediaUrl(asset.id, ttl);

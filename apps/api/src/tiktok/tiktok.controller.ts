@@ -1,4 +1,4 @@
-import { createHmac, timingSafeEqual } from 'crypto';
+import { randomBytes } from 'crypto';
 import {
   BadRequestException,
   Controller,
@@ -9,7 +9,9 @@ import {
   Res,
 } from '@nestjs/common';
 import type { Request, Response } from 'express';
-import { Public } from '../auth/decorators';
+import { Role } from '@prisma/client';
+import { CurrentUser, Public, Roles } from '../auth/decorators';
+import { AuthUser } from '../auth/auth.types';
 import { PrismaService } from '../prisma/prisma.service';
 import { encrypt } from '../common/crypto';
 import { getEnv } from '../env';
@@ -22,16 +24,17 @@ export class TikTokController {
   constructor(private readonly prisma: PrismaService) {}
 
   /** Step 1: redirect the browser to TikTok's authorization page.
-   * State is a signed HMAC of a timestamp so we can verify it without a cookie
-   * (Next.js rewrites strip Set-Cookie from proxied responses).
+   * State is a random token stored in the DB so it is single-use and bound to the requesting user.
    */
   @Get('connect')
-  connect(@Res() res: Response) {
+  @Roles(Role.ADMIN)
+  async connect(@CurrentUser() user: AuthUser, @Res() res: Response) {
     const env = getEnv();
     if (!env.TIKTOK_CLIENT_KEY) throw new BadRequestException('TIKTOK_CLIENT_KEY not configured');
-    const ts = Date.now().toString();
-    const sig = createHmac('sha256', env.JWT_SECRET).update(ts).digest('hex').slice(0, 16);
-    const state = `${ts}.${sig}`;
+    const state = randomBytes(24).toString('base64url');
+    await this.prisma.setting.create({
+      data: { key: `tiktok:state:${state}`, value: { userId: user.id, exp: Date.now() + 600_000 } },
+    });
     const url = new URL('https://www.tiktok.com/v2/auth/authorize/');
     url.searchParams.set('client_key', env.TIKTOK_CLIENT_KEY);
     url.searchParams.set('scope', 'user.info.basic,video.upload');
@@ -42,12 +45,13 @@ export class TikTokController {
   }
 
   /** Step 2: TikTok redirects here with ?code=… after the user authorizes. */
-  @Public()
+  @Roles(Role.ADMIN)
   @Get('callback')
   async callback(
     @Query('code') code: string,
     @Query('error') error: string,
     @Query('state') state: string,
+    @CurrentUser() user: AuthUser,
     @Req() req: Request,
     @Res() res: Response,
   ) {
@@ -58,8 +62,13 @@ export class TikTokController {
       return res.redirect(`${webOrigin}/accounts?tiktok_error=${encodeURIComponent(error)}`);
     }
     if (!code) throw new BadRequestException('Missing code');
-    // Verify the HMAC-signed timestamp state (max 10 min old).
-    if (!this.verifyState(state, env.JWT_SECRET)) {
+
+    // Verify state: single-use, expires in 10 min, bound to the requesting user.
+    const key = `tiktok:state:${state}`;
+    const row = state ? await this.prisma.setting.findUnique({ where: { key } }) : null;
+    const used = row ? await this.prisma.setting.deleteMany({ where: { key } }) : { count: 0 };
+    const v = row?.value as { userId?: string; exp?: number } | null;
+    if (used.count !== 1 || !v || v.userId !== user.id || (v.exp ?? 0) < Date.now()) {
       return res.redirect(`${webOrigin}/accounts?tiktok_error=invalid_state`);
     }
 
@@ -74,20 +83,17 @@ export class TikTokController {
         redirect_uri: env.TIKTOK_REDIRECT_URI,
       }),
     });
-    const tokenJson = await tokenRes.json() as {
-      data?: { access_token?: string; open_id?: string; expires_in?: number };
-      error?: { code?: string; message?: string };
+    const tokenJson = (await tokenRes.json()) as {
+      access_token?: string; open_id?: string; expires_in?: number; scope?: string;
+      error?: string; error_description?: string;
     };
-
-    if (!tokenRes.ok || tokenJson.error?.code !== 'ok') {
-      const msg = tokenJson.error?.message ?? 'Token exchange failed';
+    if (!tokenRes.ok || tokenJson.error || !tokenJson.access_token) {
+      const msg = tokenJson.error_description ?? tokenJson.error ?? 'Token exchange failed';
       return res.redirect(`${webOrigin}/accounts?tiktok_error=${encodeURIComponent(msg)}`);
     }
-
-    const { access_token, open_id, expires_in } = tokenJson.data!;
-    if (!access_token || !open_id) {
-      return res.redirect(`${webOrigin}/accounts?tiktok_error=missing_token`);
-    }
+    const { access_token, open_id, expires_in } = tokenJson;
+    if (!open_id) return res.redirect(`${webOrigin}/accounts?tiktok_error=missing_token`);
+    const granted = (tokenJson.scope ?? '').split(',').map((s) => s.trim()).filter(Boolean);
 
     let displayName = open_id;
     try {
@@ -109,40 +115,26 @@ export class TikTokController {
         username: displayName,
         encryptedToken: encrypt(access_token),
         status: 'ACTIVE',
-        canPublish: true,
+        canPublish: false,
         tokenExpiresAt: expiresAt,
         tokenIssuedAt: new Date(),
         lastVerifiedAt: new Date(),
-        grantedScopes: ['user.info.basic', 'video.upload'],
+        grantedScopes: granted,
       },
       update: {
         name: displayName,
         username: displayName,
         encryptedToken: encrypt(access_token),
         status: 'ACTIVE',
-        canPublish: true,
+        canPublish: false,
         tokenExpiresAt: expiresAt,
         tokenIssuedAt: new Date(),
         lastVerifiedAt: new Date(),
-        grantedScopes: ['user.info.basic', 'video.upload'],
+        grantedScopes: granted,
       },
     });
 
     res.redirect(`${webOrigin}/accounts?tiktok_connected=1`);
-  }
-
-  private verifyState(state: string, secret: string): boolean {
-    const parts = state?.split('.');
-    if (parts?.length !== 2) return false;
-    const [ts, sig] = parts;
-    const age = Date.now() - Number(ts);
-    if (Number.isNaN(age) || age < 0 || age > 600_000) return false;
-    const expected = createHmac('sha256', secret).update(ts).digest('hex').slice(0, 16);
-    try {
-      return timingSafeEqual(Buffer.from(sig), Buffer.from(expected));
-    } catch {
-      return false;
-    }
   }
 
   /** TikTok webhook endpoint (required by the portal). */

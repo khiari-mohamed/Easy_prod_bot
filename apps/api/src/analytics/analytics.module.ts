@@ -52,6 +52,7 @@ export class AnalyticsController {
   }
 
   @Post('import')
+  @Roles(Role.APPROVER)
   import(@Body() dto: ImportDto) {
     return this.analytics.importRows(dto.rows);
   }

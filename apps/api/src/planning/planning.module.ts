@@ -229,6 +229,7 @@ function parseRow(col: (n: string) => string, rowIndex: number, tz: string): Par
   const actionType = toActionType(col('action_type') || col('type') || 'POST');
   const rawFormat = col('format').toUpperCase();
   const format: PostFormat = FORMATS.has(rawFormat) ? (rawFormat as PostFormat) : 'REEL';
+  if (rawFormat && !FORMATS.has(rawFormat)) csvErrors.push(`Format inconnu : ${rawFormat}`);
   const rawLang = col('caption_language').toUpperCase();
   const rawMode = col('publish_mode').toUpperCase();
   const caption = col('caption') || null;
@@ -834,6 +835,10 @@ export class PlanningController {
     if (!campaign) throw new BadRequestException('Aucune campagne. Créez-en une d’abord.');
 
     if (!imp.rows.length) throw new BadRequestException('Aucune ligne à valider');
+
+    await this.policy.assertHttp({ feature: 'planning.calendar_sync', campaignId: campaign.id, action: 'COMMIT' });
+    const draftsAllowed = (await this.policy.evaluate({ feature: 'planning.auto_drafts', campaignId: campaign.id, action: 'COMMIT' })).allowed;
+
     const withError = imp.rows.filter((r) => r.error);
     if (withError.length) {
       throw new BadRequestException(
@@ -937,7 +942,7 @@ export class PlanningController {
           }
 
           // A caption written in the plan is kept as an editable DRAFT (never approved, never published).
-          if (row.caption) {
+          if (row.caption && draftsAllowed) {
             await tx.contentItem.create({
               data: {
                 campaignId: campaign.id,
@@ -1013,6 +1018,7 @@ export class PlanningController {
   async deleteImport(@Param('id') id: string, @CurrentUser() user: AuthUser) {
     const imp = await this.prisma.planImport.findUnique({ where: { id } });
     if (!imp) throw new NotFoundException();
+    if (imp.status === 'COMMITTED') throw new BadRequestException('Un import validé ne peut pas être supprimé : ses entrées de planning existent déjà.');
     await this.prisma.planImport.delete({ where: { id } });
     await this.prisma.setting.deleteMany({ where: { key: metaKey(id) } });
     if (imp.sourcePath) await unlink(join(this.sourceDir(), basename(imp.sourcePath))).catch(() => undefined);

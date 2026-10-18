@@ -18,7 +18,8 @@ export const needsPlatform = (t: PlanActionType) => NEEDS_PLATFORM.has(t);
 
 export function toActionType(v: unknown): PlanActionType {
   const s = String(v ?? '').trim().toUpperCase();
-  return (ACTION_TYPES as string[]).includes(s) ? (s as PlanActionType) : 'POST';
+  if (!s) return 'POST';
+  return (ACTION_TYPES as string[]).includes(s) ? (s as PlanActionType) : 'OTHER';
 }
 
 export const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;

@@ -119,7 +119,7 @@ export class CaptionsService {
 
     const campaign = item?.campaignId || planEntry?.campaignId
       ? await this.prisma.campaign.findUnique({ where: { id: (item?.campaignId ?? planEntry?.campaignId) as string } })
-      : await this.prisma.campaign.findFirst({ orderBy: { createdAt: 'asc' } });
+      : await this.prisma.campaign.findFirst({ orderBy: { createdAt: 'desc' } });
     if (!campaign) throw new NotFoundException('Aucune campagne configurée');
 
     // Every platform is checked against the policy BEFORE any model call.
@@ -242,7 +242,7 @@ export class CaptionsService {
       // Skip variants identical to one that is already waiting for review or approved for this slot.
       const existing = item
         ? await this.prisma.captionSuggestion.findMany({
-            where: { contentItemId: item.id, platform, language, status: { in: ['GENERATED', 'NEEDS_REVIEW', 'APPROVED'] } },
+            where: { contentItemId: item.id, platform, language, status: 'APPROVED' },
             select: { text: true, editedText: true },
           })
         : [];
@@ -552,6 +552,12 @@ export class CaptionsService {
         ...checkFacts(text, (meta.allowedFacts as string | undefined) ?? ''),
       ]),
     ];
+    const hardLanguage = warnings.filter(
+      (w) =>
+        w.startsWith('Contient peut-être de l\u2019anglais') ||
+        w.startsWith('Arabe littéraire'),
+    );
+    if (hardLanguage.length) throw new BadRequestException(hardLanguage);
     if (warnings.length && !dto.acknowledgeWarnings) {
       throw new ConflictException({
         code: 'WARNINGS_NOT_ACKNOWLEDGED',

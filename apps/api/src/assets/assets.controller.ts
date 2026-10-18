@@ -17,6 +17,7 @@ import { Role } from '@prisma/client';
 import type { Request } from 'express';
 import { diskStorage } from 'multer';
 import { existsSync, mkdirSync } from 'fs';
+import { rm } from 'fs/promises';
 import { randomUUID } from 'crypto';
 import { extname } from 'path';
 import { getEnv } from '../env';
@@ -77,7 +78,12 @@ export class AssetsController {
   )
   async upload(@UploadedFile() file: Express.Multer.File | undefined, @CurrentUser() user: AuthUser) {
     if (!file) throw new BadRequestException('No file received (field name: file)');
-    await this.policy.assertHttp({ feature: 'media.uploads', action: 'UPLOAD' });
+    try {
+      await this.policy.assertHttp({ feature: 'media.uploads', action: 'UPLOAD' });
+    } catch (e) {
+      await rm(file.path, { force: true }).catch(() => undefined);
+      throw e;
+    }
     return this.assets.uploadDirect(file.path, file.originalname, file.mimetype, user);
   }
 

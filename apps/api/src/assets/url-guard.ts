@@ -23,9 +23,16 @@ export function isPrivateAddress(address: string): boolean {
   if (v === 6) {
     const x = address.toLowerCase();
     if (x === '::' || x === '::1') return true;
-    const mapped = x.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
-    if (mapped) return isPrivateAddress(mapped[1]);
-    return x.startsWith('fc') || x.startsWith('fd') || /^fe[89ab]/.test(x) || x.startsWith('ff');
+    // IPv4 embedded in IPv6: ::ffff:a.b.c.d, ::ffff:7f00:1, ::7f00:1, 64:ff9b::7f00:1
+    const dotted = x.match(/(\d+\.\d+\.\d+\.\d+)$/);
+    if (dotted) return isPrivateAddress(dotted[1]);
+    const hex = x.match(/^(?:::ffff:|::|64:ff9b::)([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
+    if (hex) {
+      const hi = parseInt(hex[1], 16);
+      const lo = parseInt(hex[2], 16);
+      return isPrivateAddress(`${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`);
+    }
+    return x.startsWith('fc') || x.startsWith('fd') || /^fe[89ab]/.test(x) || x.startsWith('ff') || x.startsWith('2002:');
   }
   return true; // not an IP: treat as unsafe
 }

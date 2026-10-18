@@ -74,7 +74,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
   const [busy, setBusy] = useState(false);
 
   if (me.loading) return <div className="p-8"><Loading /></div>;
-  if (!me.data) return null; // api() already redirected to /login
+  if (!me.data) return <div className="p-8 text-sm text-red-600">{me.error ?? 'Connexion impossible'}</div>;
 
   const role = me.data.role;
   const canPause = role === 'ADMIN' || role === 'APPROVER';

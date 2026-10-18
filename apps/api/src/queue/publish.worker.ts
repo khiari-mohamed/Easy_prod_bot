@@ -144,9 +144,15 @@ export class PublishWorker implements OnModuleInit, OnModuleDestroy {
     // Last check right before calling Meta: pause switches or an approval change since the claim must stop it.
     if (!(await this.stillAllowed(postId))) return;
 
-    const attempt = await this.prisma.publishAttempt.create({
-      data: { postId, ok: false, state: 'STARTED', idempotencyKey: `${postId}:${post.updatedAt.getTime()}` },
-    });
+    let attempt: { id: string };
+    try {
+      attempt = await this.prisma.publishAttempt.create({
+        data: { postId, ok: false, state: 'STARTED', idempotencyKey: `${postId}:${post.updatedAt.getTime()}` },
+      });
+    } catch (e) {
+      await this.toManual(postId, `Could not record publish attempt: ${(e as Error).message}`);
+      throw new UnrecoverableError((e as Error).message);
+    }
 
     try {
       const hooks = {

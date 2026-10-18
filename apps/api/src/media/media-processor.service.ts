@@ -59,7 +59,7 @@ export class MediaProcessorService {
         '-show_streams',
         '-show_format',
         filePath,
-      ]);
+      ], { timeout: 30_000 });
       const data = JSON.parse(stdout);
       const video = (data.streams ?? []).find((s: { codec_type?: string }) => s.codec_type === 'video');
       if (!video) {

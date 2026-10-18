@@ -28,6 +28,7 @@ import { CurrentUser, Roles } from '../auth/decorators';
 import { AuthUser } from '../auth/auth.types';
 import { getEnv } from '../env';
 import { CAMPAIGN_DAYS, CAMPAIGN_SEED } from './campaign.seed';
+import { FeaturePolicyService } from '../features/feature-policy.service';
 
 class UpdateCampaignDto {
   @IsOptional() @IsString() @MaxLength(200) titleLatin?: string;
@@ -58,6 +59,7 @@ export class CampaignService implements OnApplicationBootstrap {
     private readonly prisma: PrismaService,
     private readonly ai: AiService,
     private readonly audit: AuditService,
+    private readonly policy: FeaturePolicyService,
   ) {}
 
   async onApplicationBootstrap() {
@@ -162,6 +164,11 @@ export class CampaignService implements OnApplicationBootstrap {
       include: { campaign: true },
     });
     if (!day) throw new NotFoundException('Day not found');
+
+    for (const platform of dto.platforms?.length ? dto.platforms : day.platforms) {
+      await this.policy.assertHttp({ feature: 'planning.auto_drafts', campaignId: day.campaignId, platform, action: 'GENERATE' });
+      await this.policy.assertHttp({ feature: 'ai.captions', campaignId: day.campaignId, platform, action: 'GENERATE' });
+    }
 
     const wanted = dto.platforms?.length ? dto.platforms : day.platforms;
     const existing = await this.prisma.post.findMany({

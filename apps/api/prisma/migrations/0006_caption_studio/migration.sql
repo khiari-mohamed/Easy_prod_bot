@@ -47,9 +47,11 @@ DROP INDEX IF EXISTS "HashtagPerformance_hashtagId_platform_measuredAt_idx";
 ALTER TABLE "HashtagPerformance"
   DROP CONSTRAINT IF EXISTS "HashtagPerformance_hashtagId_platform_postId_key";
 
-ALTER TABLE "HashtagPerformance"
-  ADD CONSTRAINT "HashtagPerformance_hashtagId_platform_postId_key"
-    UNIQUE ("hashtagId", "platform", "postId");
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_class WHERE relname = 'HashtagPerformance_hashtagId_platform_postId_key') THEN
+    ALTER TABLE "HashtagPerformance" ADD CONSTRAINT "HashtagPerformance_hashtagId_platform_postId_key" UNIQUE ("hashtagId","platform","postId");
+  END IF;
+END $$;
 
 CREATE INDEX IF NOT EXISTS "HashtagPerformance_hashtagId_platform_measuredAt_idx"
   ON "HashtagPerformance"("hashtagId", "platform", "measuredAt");
@@ -68,9 +70,11 @@ DROP INDEX IF EXISTS "TrendSignal_hashtagId_platform_idx";
 ALTER TABLE "TrendSignal"
   DROP CONSTRAINT IF EXISTS "TrendSignal_platform_normalizedTag_source_region_key";
 
-ALTER TABLE "TrendSignal"
-  ADD CONSTRAINT "TrendSignal_platform_normalizedTag_source_region_key"
-    UNIQUE ("platform", "normalizedTag", "source", "region");
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_class WHERE relname = 'TrendSignal_platform_normalizedTag_source_region_key') THEN
+    ALTER TABLE "TrendSignal" ADD CONSTRAINT "TrendSignal_platform_normalizedTag_source_region_key" UNIQUE ("platform","normalizedTag","source","region");
+  END IF;
+END $$;
 
 CREATE INDEX IF NOT EXISTS "TrendSignal_platform_expiresAt_idx"
   ON "TrendSignal"("platform", "expiresAt");

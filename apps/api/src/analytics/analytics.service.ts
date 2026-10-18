@@ -258,7 +258,9 @@ export class AnalyticsService {
       };
       const existing = row.externalUrl
         ? await this.prisma.post.findFirst({ where: { platform: row.platform, externalUrl: row.externalUrl } })
-        : null;
+        : await this.prisma.post.findFirst({
+            where: { platform: row.platform, isExternal: true, publishedAt: new Date(row.publishedAt), caption: row.caption ?? '(imported)' },
+          });
 
       if (existing) {
         await this.prisma.metricSnapshot.create({ data: { postId: existing.id, source: 'IMPORT', ...metrics } });

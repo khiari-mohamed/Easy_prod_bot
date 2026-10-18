@@ -413,7 +413,8 @@ export class CommentsService {
 
   private moderationReason(text: string, cfg: CommentConfig): string | null {
     const t = text.toLowerCase();
-    const word = cfg.blockedWords.find((w) => t.includes(w));
+    const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const word = cfg.blockedWords.find((w) => new RegExp(`(?<![\\p{L}\\p{N}])${esc(w)}(?![\\p{L}\\p{N}])`, 'iu').test(text));
     if (word) return `Mot interdit : ${word}`;
     if (cfg.hideLinks && /https?:\/\/|www\./i.test(text)) return 'Contient un lien';
     return null;
